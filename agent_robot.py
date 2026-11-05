@@ -2,15 +2,30 @@ from pybricks.hubs import PrimeHub
 from pybricks.pupdevices import Motor
 from pybricks.parameters import Port, Button, Color, Direction
 from pybricks.robotics import DriveBase
-from pybricks.tools import wait, StopWatch
+from pybricks.tools import wait, StopWatch, read_input_byte
 from pybricks.geometry import Matrix
 import random
 import json
 
+# Fallback for older Pybricks versions without read_input_byte
+try:
+    read_input_byte
+except NameError:
+    from usys import stdin
+    from uselect import poll
+    _poll = poll()
+    _poll.register(stdin)
+    def read_input_byte(last=False, chr=False):
+        if _poll.poll(0):
+            b = stdin.buffer.read(1)
+            if b:
+                return chr(b[0]) if chr else b[0]
+        return None
+
 # ==============================================================================
 # 1. SETTINGS (Change these for each robot)
 # ==============================================================================
-ROBOT_ID = 1                # Set to 1 for Robot 1, 2 for Robot 2, etc.
+ROBOT_ID = 3                # 1 for Robot 1, 2 for Robot 2, etc.
 AGENT_TYPE = "A"            # "A" (turns right) or "B" (turns left)
 INITIAL_INFECTED = False    # True = "I" (Red), False = "S" (Blue)
 VACCINATED = "No"           # "Yes" or "No"
@@ -24,10 +39,14 @@ WHEEL_DIAMETER = 56
 AXLE_TRACK = 112
 
 # BLE Broadcast & Observe channels (1-255)
-# Robot 1 broadcasts on Channel 1; Robot 2 broadcasts on Channel 2, etc.
-# Both observe Channel 1 for the start synchronization signal.
-SYNC_CHANNEL = 1
+# Laptop broadcasts commands on Channel 0 (e.g. 1 = START, 2 = STOP)
+# Each robot broadcasts its telemetry on its own ROBOT_ID channel
+CONTROL_CHANNEL = 0
 BROADCAST_CHANNEL = ROBOT_ID
+OBSERVE_CHANNELS = [0, 1, 2, 3]
+
+CMD_START = 1
+CMD_STOP = 2
 
 # ==============================================================================
 # 2. 5x5 DISPLAY ICONS (Matrix pixel brightness 0 to 100)
@@ -59,8 +78,8 @@ ICON_R = Matrix([
 # ==============================================================================
 # 3. INITIALIZATION
 # ==============================================================================
-# Each robot broadcasts telemetry on its own channel (ROBOT_ID) and listens on Channel 1
-hub = PrimeHub(broadcast_channel=BROADCAST_CHANNEL, observe_channels=[SYNC_CHANNEL])
+# Each robot broadcasts telemetry on its own channel and listens on OBSERVE_CHANNELS
+hub = PrimeHub(broadcast_channel=BROADCAST_CHANNEL, observe_channels=OBSERVE_CHANNELS)
 
 sir_state = "I" if INITIAL_INFECTED else "S"
 current_zone = "0"
@@ -68,7 +87,7 @@ log_entries = []
 seq_num = 0
 stopwatch = StopWatch()
 
-# Setup Motors and DriveBase (graceful fallback if disconnected during testing)
+# Setup Motors and DriveBase (graceful fallback if disconnected during bench testing)
 drive_base = None
 try:
     left_m = Motor(LEFT_MOTOR_PORT, Direction.COUNTERCLOCKWISE)
@@ -102,7 +121,7 @@ def show_state(state):
 def log_sample(event_name="Sample"):
     """
     Logs snapshot row and broadcasts it over BLE.
-    Laptop BLE listener picks up this broadcast packet in real-time.
+    The laptop central hub picks up this broadcast packet in real-time.
     """
     global seq_num
     elapsed_s = round(stopwatch.time() / 1000.0, 1)
@@ -130,46 +149,78 @@ def log_sample(event_name="Sample"):
     except Exception:
         pass
 
-# ==============================================================================
-# 4. START SYNCHRONIZATION OVER BLE
-# ==============================================================================
-def wait_for_start_sync():
+def check_laptop_command():
     """
-    Standby mode:
-    Both robots start without moving.
-    - Robot 1: Waits until you press the RIGHT (+) button, then broadcasts "START" via BLE.
-    - Robot 2 (and others): Observes Channel 1 via BLE. When it hears "START", it starts on its own.
-    Both robots reset their StopWatch to 0.0s simultaneously.
+    Checks for START / STOP commands from the laptop:
+    1. Over BLE GATT connection / stdin: 'S' or '1' = Start, 'X' or '2' = Stop
+    2. Over BLE broadcast channels (0, 1, 2): CMD_START (1) or CMD_STOP (2)
+    3. Physical button fallback: RIGHT (+) button starts, LEFT (-) button stops
+    """
+    # Check stdin (direct BLE GATT / USB connection from laptop)
+    while True:
+        try:
+            byte_in = read_input_byte(chr=True)
+        except Exception:
+            break
+        if not byte_in:
+            break
+        if byte_in in ("S", "s", "1"):
+            return CMD_START
+        elif byte_in in ("X", "x", "2", "Q", "q"):
+            return CMD_STOP
+
+    # Check BLE broadcast on observed channels
+    for ch in OBSERVE_CHANNELS:
+        try:
+            obs = hub.ble.observe(ch)
+        except Exception:
+            obs = None
+        if obs is not None:
+            if obs == CMD_START or obs == "START":
+                return CMD_START
+            if isinstance(obs, tuple) and len(obs) > 0 and (obs[0] == CMD_START or obs[0] == "START"):
+                return CMD_START
+            if obs == CMD_STOP or obs == "STOP":
+                return CMD_STOP
+            if isinstance(obs, tuple) and len(obs) > 0 and (obs[0] == CMD_STOP or obs[0] == "STOP"):
+                return CMD_STOP
+
+    return None
+
+# ==============================================================================
+# 4. STANDBY MODE (Waits for Laptop Start Command)
+# ==============================================================================
+def wait_for_start():
+    """
+    Robot sits stationary in standby.
+    Starts automatically when laptop sends START command (or user presses RIGHT button).
     """
     show_state(sir_state)
-    hub.light.on(Color.ORANGE)  # Orange status light indicates Standby
+    hub.light.on(Color.ORANGE)  # Orange light indicates Standby
 
-    if ROBOT_ID == 1:
-        print("\n[ROBOT 1 - MASTER] Ready in Standby. Press RIGHT (+) button to start all robots...")
-        while Button.RIGHT not in hub.buttons.pressed():
-            wait(20)
+    # Broadcast STANDBY presence so the laptop sees this robot immediately without connecting
+    try:
+        hub.ble.broadcast(("STANDBY", ROBOT_ID, sir_state))
+    except Exception:
+        pass
 
-        # Debounce button
-        while Button.RIGHT in hub.buttons.pressed():
-            wait(10)
+    print(f"\n[ROBOT {ROBOT_ID}] Ready in Standby. Waiting for START command from laptop...")
 
-        # Broadcast start signal repeatedly over BLE for 300 ms so all hubs receive it
-        print("Broadcasting START signal over BLE...")
-        for _ in range(15):
-            hub.ble.broadcast("START")
-            wait(20)
+    while True:
+        cmd = check_laptop_command()
+        if cmd == CMD_START or Button.RIGHT in hub.buttons.pressed():
+            print(f"[ROBOT {ROBOT_ID}] START command received! Starting experiment...")
+            # Relay start broadcast to any peer robots listening
+            try:
+                for _ in range(3):
+                    hub.ble.broadcast((CMD_START, "START"))
+                    wait(30)
+            except Exception:
+                pass
+            break
+        wait(20)
 
-    else:
-        print(f"\n[ROBOT {ROBOT_ID} - LISTENER] Ready in Standby. Waiting for BLE START broadcast from Robot 1...")
-        while True:
-            # Check for broadcast from Robot 1 on Channel 1
-            data = hub.ble.observe(SYNC_CHANNEL)
-            if data == "START":
-                print(f"BLE START signal received on Robot {ROBOT_ID}!")
-                break
-            wait(15)
-
-    # Both robots synchronize t = 0.0s here
+    # Synchronize t = 0.0s
     stopwatch.reset()
     show_state(sir_state)
     hub.speaker.beep(frequency=1000, duration=200)
@@ -178,7 +229,7 @@ def wait_for_start_sync():
 # 5. MAIN PROGRAM
 # ==============================================================================
 def main():
-    wait_for_start_sync()
+    wait_for_start()
 
     print("Time_Stamp,ID,Event,Zone,SIR_State,Contact_ID,Agent_Type,Vaccinated")
     log_sample("Start")
@@ -191,8 +242,19 @@ def main():
     phase = 0  # 0 = straight, 1 = pause, 2 = turn, 3 = pause
     step_duration_ms = 2000
 
-    # Run until the LEFT button is pressed (or stop via center button / Pybricks UI)
-    while Button.LEFT not in hub.buttons.pressed():
+    # Run until STOP command from laptop OR LEFT button pressed on hub
+    while True:
+        cmd = check_laptop_command()
+        if cmd == CMD_STOP or Button.LEFT in hub.buttons.pressed():
+            print(f"[ROBOT {ROBOT_ID}] STOP command received! Halting...")
+            try:
+                for _ in range(3):
+                    hub.ble.broadcast((CMD_STOP, "STOP"))
+                    wait(30)
+            except Exception:
+                pass
+            break
+
         now_ms = stopwatch.time()
 
         # 1. Periodic snapshot log every 1000 ms (1.0 s)

@@ -3,6 +3,8 @@ import unittest
 import os
 import sys
 import json
+import struct
+import tempfile
 from unittest.mock import MagicMock
 
 # Mock Pybricks modules for host PC testing
@@ -26,6 +28,8 @@ class MockMatrix:
 sys.modules["pybricks.geometry"].Matrix = MockMatrix
 
 from download_log import save_json_log
+import live_ble_receiver
+from live_ble_receiver import CentralHub, CMD_START_STDIN, CMD_STOP_STDIN
 
 class TestPybricksAgent(unittest.TestCase):
     def test_icons_dimensions(self):
@@ -38,8 +42,6 @@ class TestPybricksAgent(unittest.TestCase):
                     self.assertIn(val, (0, 100), f"Pixel in {name} must be 0 or 100")
 
     def test_live_ble_receiver_decoding(self):
-        import struct
-        import live_ble_receiver
         payload = b'\x01' + b'\x61\x01' + b'\x84' + struct.pack('<f', 3.0) + b'\xA1S' + b'\xA11' + b'\x61\x02'
         channel, vals = live_ble_receiver.decode_pybricks_payload(payload)
         self.assertEqual(channel, 1)
@@ -59,6 +61,39 @@ class TestPybricksAgent(unittest.TestCase):
         self.assertEqual(len(data), 1)
         self.assertEqual(data[0]["SIR_State"], "I")
         os.remove(filepath)
+
+    def test_central_hub_commands(self):
+        self.assertEqual(CMD_START_STDIN, b"\x06S")
+        self.assertEqual(CMD_STOP_STDIN, b"\x06X")
+
+    def test_central_hub_recording_and_deduplication(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            hub = CentralHub(output_dir=tmpdir)
+            
+            # Feed broadcast packet
+            hub.handle_broadcast_packet(1, [1, 1.0, "I", "0", 1])
+            hub.handle_broadcast_packet(2, [2, 1.0, "S", "0", 1])
+            
+            # Feed duplicate packet
+            hub.handle_broadcast_packet(1, [1, 1.0, "I", "0", 1])
+
+            self.assertEqual(len(hub.current_run_entries), 2)
+            self.assertEqual(hub.current_run_entries[0]["ID"], 1)
+            self.assertEqual(hub.current_run_entries[0]["SIR_State"], "I")
+            self.assertEqual(hub.current_run_entries[1]["ID"], 2)
+            self.assertEqual(hub.current_run_entries[1]["SIR_State"], "S")
+
+            # Feed stdout notification
+            stdout_raw = bytearray(b"\x012.0,1,Sample,0,I,\xe2\x80\x94,A,No\n")
+            hub.handle_stdout_data(None, stdout_raw)
+            self.assertEqual(len(hub.current_run_entries), 3)
+
+            saved_path = hub.save_run()
+            self.assertIsNotNone(saved_path)
+            self.assertTrue(os.path.exists(saved_path))
+            with open(saved_path, "r") as f:
+                saved_data = json.load(f)
+            self.assertEqual(len(saved_data), 3)
 
 if __name__ == "__main__":
     unittest.main()

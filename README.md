@@ -36,44 +36,64 @@ VACCINATED = "No"
 
 ---
 
-## 3. Simultaneous Startup Workflow
+## 3. Laptop Central Hub Workflow (`live_ble_receiver.py`)
 
-1. Click **Play** on **Robot 1** and **Robot 2**:
-   - Both robots initialize their motors and show their centered `"I"`, `"S"`, or `"R"` icon with an **Orange** status light.
-   - **Neither robot moves.**
-   - Robot 2 passively listens on BLE Channel 1 for the start signal.
-2. Press the **`+` (Right button)** on **Robot 1**:
-   - Robot 1 broadcasts `"START"` over BLE.
-   - Robot 2 receives the `"START"` broadcast wirelessly through the air.
-   - **Both robots simultaneously reset their timers ($t = 0.0\text{ s}$), play a start beep, and start moving at the exact same moment on their own.**
-3. **Stop the Run**:
-   - Press the **`-` (Left button)** or the **Center button** on either hub.
-   - The robot halts and outputs the JSON log to the Pybricks terminal.
+Your laptop is now the **command center**: it starts and stops all robots wirelessly and automatically compiles each run into a clean JSON dataset.
+
+### Step 1: Put Robots in Standby
+1. Start [`agent_robot.py`](agent_robot.py) on **Robot 1** and **Robot 2** (via Pybricks web IDE or on boot):
+   - Both robots initialize their motors and display their centered `"I"`, `"S"`, or `"R"` icon with an **Orange** status light.
+   - **Neither robot moves.** They wait in standby for the wireless START trigger.
+
+### Step 2: Launch the Central Hub on your Laptop
+In your terminal, run:
+```bash
+./.venv/bin/python3 live_ble_receiver.py
+```
+*(or `source .venv/bin/activate && python3 live_ble_receiver.py`)*
+
+The Central Hub automatically discovers nearby SPIKE Prime robots and connects to them:
+```text
+================================================================
+  KIT SYDSEN - LEGO SPIKE Digital Twin Central Hub
+================================================================
+  [s] or ENTER : START ALL ROBOTS (Synchronized wireless trigger)
+  [x] or [q]   : STOP ALL ROBOTS (Halts motors & logs)
+  [c] or scan  : SCAN & CONNECT to active Pybricks Hubs
+  [status]     : Show connected robots & run statistics
+  [save]       : Force save current run immediately
+  Auto-Save    : Runs automatically save 10s after last log
+================================================================
+🔍 Scanning for Pybricks Hubs...
+✨ Discovered 2 Pybricks Hub(s). Establishing links...
+🟢 Successfully connected to Robot 1!
+🟢 Successfully connected to Robot 2!
+```
 
 ---
 
-## 4. Automatic Live BLE Logging on your Laptop (`live_ble_receiver.py`)
+## 4. Running Experiments
 
-You don't need to manually copy or download logs from each hub anymore! Your laptop can listen directly to the robots' BLE broadcasts during the experiment:
+### Start All Robots:
+Press **`s`** (or press **`ENTER`**) in the terminal:
+- The laptop transmits the start signal to all connected robots simultaneously.
+- All robots synchronize their timers to $t = 0.0\text{ s}$, play a beep, turn on their state lights, and begin moving at the exact same instant!
+- Real-time telemetry is streamed live to your laptop console:
+  ```text
+  [16:45:01] 📡 Robot 1 | t= 1.0s | State: I | Zone: 0 | Type: A
+  [16:45:01] 📡 Robot 2 | t= 1.0s | State: S | Zone: 0 | Type: B
+  [16:45:02] 📡 Robot 1 | t= 2.0s | State: I | Zone: 0 | Type: A
+  [16:45:02] 📡 Robot 2 | t= 2.0s | State: S | Zone: 0 | Type: B
+  ```
 
-1. In your laptop terminal, run:
-   ```bash
-   ./.venv/bin/python3 live_ble_receiver.py
-   ```
-   *(or `source .venv/bin/activate && python3 live_ble_receiver.py`)*
+### Stop All Robots:
+Press **`x`** (or **`q`**) in the terminal:
+- The laptop sends the stop signal to all robots.
+- The robots immediately stop their motors and finalize their logs.
+- The run is automatically compiled and saved to:
+  ```text
+  logs/run_01_YYYYMMDD_HHMMSS.json
+  ```
+- The Central Hub immediately readies itself for Run 2! (Press `s` whenever you are ready for the next test).
 
-2. It scans for broadcast packets emitted by the robots in real-time and logs each row:
-   ```text
-   ⚡ BLE START Broadcast detected on Channel 1!
-   📡 Received Robot 1 | t= 1.0s | Zone 0 | State I
-   📡 Received Robot 2 | t= 1.0s | Zone 0 | State S
-   📡 Received Robot 1 | t= 2.0s | Zone 0 | State I
-   ...
-   ```
-
-3. **Auto-save when run finishes**:
-   When you stop the robots, the script detects **10 seconds of inactivity**, automatically closes the run, and saves the full consolidated dataset into:
-   ```text
-   logs/run_01_YYYYMMDD_HHMMSS.json
-   ```
-   It then resets and continues listening for the next experiment run automatically!
+*(Physical fallback: Pressing the `+` Right button on Robot 1 will also start the experiment, and `-` Left button will stop).*
