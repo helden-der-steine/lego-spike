@@ -36,64 +36,52 @@ VACCINATED = "No"
 
 ---
 
-## 3. Laptop Central Hub Workflow (`live_ble_receiver.py`)
+## 3. 100% Connectionless BLE Broadcast Workflow (`live_ble_receiver.py`)
 
-Your laptop is now the **command center**: it starts and stops all robots wirelessly and automatically compiles each run into a clean JSON dataset.
+No BLE GATT connections or pairing are used:
+- **Laptop $\to$ Robots (Channel `0`)**: Your Windows laptop broadcasts `START` (`1`) and `STOP` (`2`) on **BLE Channel `0`** using `BluetoothLEAdvertisementPublisher` (`0x0397` LEGO Manufacturer Data). All robots observe **only Channel `0`**.
+- **Robots $\to$ Laptop (Channels `1..10`)**: Each robot (`ROBOT_ID = 1..10`) broadcasts its Standby status and 1.0s telemetry on its own channel (`1..10`). Your laptop passively listens on **Channels `1..10`**.
 
-### Step 1: Put Robots in Standby
-1. Start [`agent_robot.py`](agent_robot.py) on **Robot 1** and **Robot 2** (via Pybricks web IDE or on boot):
-   - Both robots initialize their motors and display their centered `"I"`, `"S"`, or `"R"` icon with an **Orange** status light.
-   - **Neither robot moves.** They wait in standby for the wireless START trigger.
+### Step 1: Start Robots in Standby
+1. Start [`agent_robot.py`](agent_robot.py) on each robot (`ROBOT_ID = 1, 2, 3, ...`):
+   - Each robot displays its centered `"I"`, `"S"`, or `"R"` icon with an **Orange** status light.
+   - It broadcasts `"STANDBY"` on its channel (`ROBOT_ID`) and listens on **Channel `0`**.
 
-### Step 2: Launch the Central Hub on your Laptop
-In your terminal, run:
-```bash
-./.venv/bin/python3 live_ble_receiver.py
+### Step 2: Launch the Central Hub on Windows
+Install `bleak` (which automatically installs the Windows WinRT Bluetooth advertisement packages):
+```powershell
+pip install bleak
+python live_ble_receiver.py
 ```
-*(or `source .venv/bin/activate && python3 live_ble_receiver.py`)*
 
-The Central Hub automatically discovers nearby SPIKE Prime robots and connects to them:
+The Central Hub passively listens on Channels `1..10` and detects robots in Standby:
 ```text
-================================================================
-  KIT SYDSEN - LEGO SPIKE Digital Twin Central Hub
-================================================================
-  [s] or ENTER : START ALL ROBOTS (Synchronized wireless trigger)
-  [x] or [q]   : STOP ALL ROBOTS (Halts motors & logs)
-  [c] or scan  : SCAN & CONNECT to active Pybricks Hubs
-  [status]     : Show connected robots & run statistics
-  [save]       : Force save current run immediately
-  Auto-Save    : Runs automatically save 10s after last log
-================================================================
-🔍 Scanning for Pybricks Hubs...
-✨ Discovered 2 Pybricks Hub(s). Establishing links...
-🟢 Successfully connected to Robot 1!
-🟢 Successfully connected to Robot 2!
+📡 Passive BLE Scanner active on Channels 1..10 (waiting for robots in Standby)...
+[12:15:01] 🟠 Robot 1 (Channel 1) READY in Standby | SIR State: I
+[12:15:01] 🟠 Robot 2 (Channel 2) READY in Standby | SIR State: S
+[12:15:02] 🟠 Robot 3 (Channel 3) READY in Standby | SIR State: S
 ```
 
 ---
 
 ## 4. Running Experiments
 
-### Start All Robots:
-Press **`s`** (or press **`ENTER`**) in the terminal:
-- The laptop transmits the start signal to all connected robots simultaneously.
-- All robots synchronize their timers to $t = 0.0\text{ s}$, play a beep, turn on their state lights, and begin moving at the exact same instant!
-- Real-time telemetry is streamed live to your laptop console:
+### Start All Robots (`s` or `ENTER`):
+Press **`s`** (or **`ENTER`**) in the laptop terminal:
+- The laptop broadcasts `START` (`1`) on **BLE Channel `0`**.
+- All robots observing Channel `0` simultaneously reset their timers to $t = 0.0\text{ s}$, beep, and start driving!
+- Live telemetry from Channels `1..10` is logged in real time:
   ```text
-  [16:45:01] 📡 Robot 1 | t= 1.0s | State: I | Zone: 0 | Type: A
-  [16:45:01] 📡 Robot 2 | t= 1.0s | State: S | Zone: 0 | Type: B
-  [16:45:02] 📡 Robot 1 | t= 2.0s | State: I | Zone: 0 | Type: A
-  [16:45:02] 📡 Robot 2 | t= 2.0s | State: S | Zone: 0 | Type: B
+  [12:15:05] 📡 Ch  1 | Robot 1 | t=  1.0s | State: I | Zone: 0 | Type: A
+  [12:15:05] 📡 Ch  2 | Robot 2 | t=  1.0s | State: S | Zone: 0 | Type: B
+  [12:15:05] 📡 Ch  3 | Robot 3 | t=  1.0s | State: S | Zone: 0 | Type: A
   ```
 
-### Stop All Robots:
+### Stop All Robots (`x` or `q`):
 Press **`x`** (or **`q`**) in the terminal:
-- The laptop sends the stop signal to all robots.
-- The robots immediately stop their motors and finalize their logs.
-- The run is automatically compiled and saved to:
+- The laptop broadcasts `STOP` (`2`) on **BLE Channel `0`**.
+- All robots observing Channel `0` immediately stop their motors and halt broadcasting.
+- The run is automatically saved (or auto-saved after 10 seconds of silence) to:
   ```text
   logs/run_01_YYYYMMDD_HHMMSS.json
   ```
-- The Central Hub immediately readies itself for Run 2! (Press `s` whenever you are ready for the next test).
-
-*(Physical fallback: Pressing the `+` Right button on Robot 1 will also start the experiment, and `-` Left button will stop).*

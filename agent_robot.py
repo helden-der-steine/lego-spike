@@ -2,30 +2,15 @@ from pybricks.hubs import PrimeHub
 from pybricks.pupdevices import Motor
 from pybricks.parameters import Port, Button, Color, Direction
 from pybricks.robotics import DriveBase
-from pybricks.tools import wait, StopWatch, read_input_byte
+from pybricks.tools import wait, StopWatch
 from pybricks.geometry import Matrix
 import random
 import json
 
-# Fallback for older Pybricks versions without read_input_byte
-try:
-    read_input_byte
-except NameError:
-    from usys import stdin
-    from uselect import poll
-    _poll = poll()
-    _poll.register(stdin)
-    def read_input_byte(last=False, chr=False):
-        if _poll.poll(0):
-            b = stdin.buffer.read(1)
-            if b:
-                return chr(b[0]) if chr else b[0]
-        return None
-
 # ==============================================================================
-# 1. SETTINGS (Change these for each robot)
+# 1. SETTINGS (Change these for each robot: ROBOT_ID = 1..10)
 # ==============================================================================
-ROBOT_ID = 3                # 1 for Robot 1, 2 for Robot 2, etc.
+ROBOT_ID = 1                # 1..10 (Robot broadcasts on Channel ROBOT_ID)
 AGENT_TYPE = "A"            # "A" (turns right) or "B" (turns left)
 INITIAL_INFECTED = False    # True = "I" (Red), False = "S" (Blue)
 VACCINATED = "No"           # "Yes" or "No"
@@ -38,12 +23,13 @@ RIGHT_MOTOR_PORT = Port.D
 WHEEL_DIAMETER = 56
 AXLE_TRACK = 112
 
-# BLE Broadcast & Observe channels (1-255)
-# Laptop broadcasts commands on Channel 0 (e.g. 1 = START, 2 = STOP)
-# Each robot broadcasts its telemetry on its own ROBOT_ID channel
+# ==============================================================================
+# BLE Channels (100% Connectionless BLE Broadcast)
+# - Laptop broadcasts commands on Channel 0 (robots listen ONLY to Channel 0)
+# - Each robot broadcasts telemetry on its own channel: ROBOT_ID (1..10)
+# ==============================================================================
 CONTROL_CHANNEL = 0
 BROADCAST_CHANNEL = ROBOT_ID
-OBSERVE_CHANNELS = [0, 1, 2, 3]
 
 CMD_START = 1
 CMD_STOP = 2
@@ -78,8 +64,8 @@ ICON_R = Matrix([
 # ==============================================================================
 # 3. INITIALIZATION
 # ==============================================================================
-# Each robot broadcasts telemetry on its own channel and listens on OBSERVE_CHANNELS
-hub = PrimeHub(broadcast_channel=BROADCAST_CHANNEL, observe_channels=OBSERVE_CHANNELS)
+# Broadcasts on channel ROBOT_ID (1..10) and observes ONLY channel 0 (laptop)
+hub = PrimeHub(broadcast_channel=BROADCAST_CHANNEL, observe_channels=[CONTROL_CHANNEL])
 
 sir_state = "I" if INITIAL_INFECTED else "S"
 current_zone = "0"
@@ -120,7 +106,7 @@ def show_state(state):
 
 def log_sample(event_name="Sample"):
     """
-    Logs snapshot row and broadcasts it over BLE.
+    Logs snapshot row and broadcasts it over BLE on channel ROBOT_ID (1..10).
     The laptop central hub picks up this broadcast packet in real-time.
     """
     global seq_num
@@ -143,7 +129,7 @@ def log_sample(event_name="Sample"):
         elapsed_s, ROBOT_ID, event_name, current_zone, sir_state, AGENT_TYPE, VACCINATED
     ))
 
-    # Broadcast over BLE: compact tuple (ROBOT_ID, elapsed_s, sir_state, current_zone, seq_num)
+    # Broadcast over BLE on Channel ROBOT_ID: (ROBOT_ID, elapsed_s, sir_state, current_zone, seq_num)
     try:
         hub.ble.broadcast((ROBOT_ID, elapsed_s, sir_state, current_zone, seq_num))
     except Exception:
@@ -151,72 +137,50 @@ def log_sample(event_name="Sample"):
 
 def check_laptop_command():
     """
-    Checks for START / STOP commands from the laptop:
-    1. Over BLE GATT connection / stdin: 'S' or '1' = Start, 'X' or '2' = Stop
-    2. Over BLE broadcast channels (0, 1, 2): CMD_START (1) or CMD_STOP (2)
-    3. Physical button fallback: RIGHT (+) button starts, LEFT (-) button stops
+    Observes BLE broadcast Channel 0 from the laptop:
+    - CMD_START (1 or "START") -> Start experiment
+    - CMD_STOP  (2 or "STOP")  -> Stop experiment
     """
-    # Check stdin (direct BLE GATT / USB connection from laptop)
-    while True:
-        try:
-            byte_in = read_input_byte(chr=True)
-        except Exception:
-            break
-        if not byte_in:
-            break
-        if byte_in in ("S", "s", "1"):
-            return CMD_START
-        elif byte_in in ("X", "x", "2", "Q", "q"):
-            return CMD_STOP
+    try:
+        obs = hub.ble.observe(CONTROL_CHANNEL)
+    except Exception:
+        obs = None
 
-    # Check BLE broadcast on observed channels
-    for ch in OBSERVE_CHANNELS:
-        try:
-            obs = hub.ble.observe(ch)
-        except Exception:
-            obs = None
-        if obs is not None:
-            if obs == CMD_START or obs == "START":
-                return CMD_START
-            if isinstance(obs, tuple) and len(obs) > 0 and (obs[0] == CMD_START or obs[0] == "START"):
-                return CMD_START
-            if obs == CMD_STOP or obs == "STOP":
-                return CMD_STOP
-            if isinstance(obs, tuple) and len(obs) > 0 and (obs[0] == CMD_STOP or obs[0] == "STOP"):
-                return CMD_STOP
+    if obs is not None:
+        if obs == CMD_START or obs == "START":
+            return CMD_START
+        if isinstance(obs, tuple) and len(obs) > 0 and (obs[0] == CMD_START or obs[0] == "START"):
+            return CMD_START
+        if obs == CMD_STOP or obs == "STOP":
+            return CMD_STOP
+        if isinstance(obs, tuple) and len(obs) > 0 and (obs[0] == CMD_STOP or obs[0] == "STOP"):
+            return CMD_STOP
 
     return None
 
 # ==============================================================================
-# 4. STANDBY MODE (Waits for Laptop Start Command)
+# 4. STANDBY MODE (Waits for Laptop BLE Broadcast on Channel 0)
 # ==============================================================================
 def wait_for_start():
     """
-    Robot sits stationary in standby.
-    Starts automatically when laptop sends START command (or user presses RIGHT button).
+    Robot sits stationary in standby and broadcasts its presence on Channel ROBOT_ID.
+    Starts automatically when the laptop broadcasts START on Channel 0.
     """
     show_state(sir_state)
     hub.light.on(Color.ORANGE)  # Orange light indicates Standby
 
-    # Broadcast STANDBY presence so the laptop sees this robot immediately without connecting
+    # Broadcast STANDBY presence on Channel ROBOT_ID so laptop sees this robot is ready
     try:
         hub.ble.broadcast(("STANDBY", ROBOT_ID, sir_state))
     except Exception:
         pass
 
-    print(f"\n[ROBOT {ROBOT_ID}] Ready in Standby. Waiting for START command from laptop...")
+    print(f"\n[ROBOT {ROBOT_ID}] Standby (listening on BLE Channel 0, broadcasting on Channel {BROADCAST_CHANNEL})...")
 
     while True:
         cmd = check_laptop_command()
         if cmd == CMD_START or Button.RIGHT in hub.buttons.pressed():
-            print(f"[ROBOT {ROBOT_ID}] START command received! Starting experiment...")
-            # Relay start broadcast to any peer robots listening
-            try:
-                for _ in range(3):
-                    hub.ble.broadcast((CMD_START, "START"))
-                    wait(30)
-            except Exception:
-                pass
+            print(f"[ROBOT {ROBOT_ID}] START broadcast received on Channel 0! Starting...")
             break
         wait(20)
 
@@ -242,17 +206,11 @@ def main():
     phase = 0  # 0 = straight, 1 = pause, 2 = turn, 3 = pause
     step_duration_ms = 2000
 
-    # Run until STOP command from laptop OR LEFT button pressed on hub
+    # Run until STOP broadcast on Channel 0 (or LEFT button pressed on hub)
     while True:
         cmd = check_laptop_command()
         if cmd == CMD_STOP or Button.LEFT in hub.buttons.pressed():
-            print(f"[ROBOT {ROBOT_ID}] STOP command received! Halting...")
-            try:
-                for _ in range(3):
-                    hub.ble.broadcast((CMD_STOP, "STOP"))
-                    wait(30)
-            except Exception:
-                pass
+            print(f"[ROBOT {ROBOT_ID}] STOP broadcast received on Channel 0! Halting...")
             break
 
         now_ms = stopwatch.time()
@@ -286,9 +244,13 @@ def main():
 
         wait(20)
 
-    # Stop motors
+    # Stop motors and stop BLE telemetry broadcasting
     if drive_base:
         drive_base.stop()
+    try:
+        hub.ble.broadcast(None)
+    except Exception:
+        pass
     hub.display.off()
     hub.speaker.beep(frequency=400, duration=300)
 
