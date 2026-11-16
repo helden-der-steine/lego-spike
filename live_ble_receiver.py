@@ -321,7 +321,7 @@ class CentralHub:
                     "Zone": zone,
                     "SIR_State": sir_state,
                     "Contact_ID": "—",
-                    "Agent_Type": "A" if robot_id % 2 == 1 else "B",
+                    "Agent_Type": "B" if robot_id >= 5 else "A",
                     "Vaccinated": "No",
                 },
                 seq_num=seq_num,
