@@ -12,7 +12,7 @@ import gc
 # 1. SETTINGS (Automatically derived from Hub Name: "Held 1", "Held 2", ...)
 # ==============================================================================
 VACCINATED = "No"           # "Yes" or "No"
-ENABLE_MOVEMENT = False     # Set True to enable driving
+ENABLE_MOVEMENT = True      # Set True to enable driving
 
 # Default motor ports
 LEFT_MOTOR_PORT = Port.C
@@ -27,6 +27,19 @@ ZONE_NAMES = {
     "Blue": "Blue",
     "White": "White",
 }
+
+# Clockwise zone sequence: White -> Blue -> Green -> Red -> White
+ZONE_ORDER_CW = ("White", "Blue", "Green", "Red")
+
+# Slow driving & edge-avoidance parameters
+DRIVE_SPEED_MM_S = 35       # Very slow forward/backup speed (mm/s)
+TURN_SPEED_DEG_S = 45       # Slow in-place turn speed (deg/s)
+EDGE_CONFIRM_MS = 400       # Cross touching zone seams (~14 mm) before treating None as dark table edge
+BACKUP_DURATION_MS = 1000   # Max reverse time (~35 mm) when backing away from an edge/disallowed zone
+EDGE_TURN_MIN_DEG = 90
+EDGE_TURN_MAX_DEG = 180
+ZONE_DEBOUNCE_SAMPLES = 3
+DISALLOWED_CONFIRM_MS = 350
 
 # DriveBase wheel dimensions (Standard SPIKE Prime wheels: 56 mm, track: 112 mm)
 WHEEL_DIAMETER = 56
@@ -82,7 +95,7 @@ def config_from_hub_name(hub_name, default_id=1):
     """
     robot_id = parse_robot_id(hub_name, default=default_id)
     agent_type = "B" if robot_id >= 5 else "A"
-    initial_infected = (robot_id == 1)
+    initial_infected = (robot_id == 2)
     return robot_id, agent_type, initial_infected
 
 
@@ -189,7 +202,7 @@ def detect_zone(sensor):
         return None
 
     # White: low saturation, high value (HSV observed: S=7..13, V=53..78)
-    if s <= 20 and v >= 35:
+    if s <= 16 and v >= 35:
         return ZONE_NAMES["White"]
 
     # Red: hue near 0/360, high saturation (HSV observed: H=10..14, S=87..89, V=40..51)
@@ -360,7 +373,173 @@ def wait_for_start():
     hub.speaker.beep(frequency=1000, duration=200)
 
 # ==============================================================================
-# 5. MAIN PROGRAM
+# 5. ZONE NAVIGATION & EDGE AVOIDANCE
+# ==============================================================================
+def get_allowed_next_zone(current, agent_type):
+    """
+    Returns the single allowed next zone from `current`:
+    - Type A moves clockwise: White -> Blue -> Green -> Red -> White
+    - Type B moves counter-clockwise: White -> Red -> Green -> Blue -> White
+    Returns None if `current` is not yet one of the 4 zones (e.g. '0').
+    """
+    if current not in ZONE_ORDER_CW:
+        return None
+    idx = ZONE_ORDER_CW.index(current)
+    step = 1 if agent_type == "A" else -1
+    return ZONE_ORDER_CW[(idx + step) % len(ZONE_ORDER_CW)]
+
+
+def is_zone_transition_allowed(current, detected, agent_type):
+    """Returns True only if moving from `current` into `detected` is permitted."""
+    if detected is None or detected == current:
+        return False
+    allowed = get_allowed_next_zone(current, agent_type)
+    if allowed is None:
+        return detected in ZONE_ORDER_CW
+    return detected == allowed
+
+
+def pick_edge_turn_angle(agent_type):
+    """
+    Picks a random 90-180 degree turn angle:
+    - Type A turns clockwise (+90..+180)
+    - Type B turns counter-clockwise (-90..-180)
+    """
+    angle = random.randint(EDGE_TURN_MIN_DEG, EDGE_TURN_MAX_DEG)
+    return angle if agent_type == "A" else -angle
+
+
+class ZoneNavigator:
+    """
+    Drives slowly inside the current zone, allows transitions ONLY into the
+    next zone in the configured direction (A: clockwise, B: counter-clockwise),
+    and backs up + turns 90-180 deg when hitting an edge or disallowed zone.
+    """
+
+    def __init__(self, agent_type, drive_base_obj=None, has_color_sensor=True):
+        self.agent_type = agent_type
+        self.drive_base = drive_base_obj
+        self.has_color_sensor = has_color_sensor
+        self.state = "DRIVE"  # "DRIVE", "BACKUP", "TURN"
+        self.state_start_ms = 0
+        self.turn_timeout_ms = 0
+        self.seen_cur_backup = False
+        self.pending_zone = None
+        self.pending_count = 0
+        self.edge_start_ms = None
+        self.disallowed_start_ms = None
+
+    def start(self, now_ms=0):
+        """Configures slow DriveBase settings and begins driving straight."""
+        if self.drive_base:
+            try:
+                self.drive_base.settings(DRIVE_SPEED_MM_S, 100, TURN_SPEED_DEG_S, 120)
+            except Exception:
+                pass
+            self.drive_base.drive(speed=DRIVE_SPEED_MM_S, turn_rate=0)
+        self.state = "DRIVE"
+        self.state_start_ms = now_ms
+
+    def _reset_debounces(self):
+        self.pending_zone = None
+        self.pending_count = 0
+        self.edge_start_ms = None
+        self.disallowed_start_ms = None
+
+    def _start_backup(self, now_ms):
+        self._reset_debounces()
+        self.state = "BACKUP"
+        self.state_start_ms = now_ms
+        self.seen_cur_backup = False
+        if self.drive_base:
+            self.drive_base.stop()
+            self.drive_base.drive(speed=-DRIVE_SPEED_MM_S, turn_rate=0)
+
+    def _start_turn(self, now_ms):
+        self._reset_debounces()
+        angle = pick_edge_turn_angle(self.agent_type)
+        self.state = "TURN"
+        self.state_start_ms = now_ms
+        self.turn_timeout_ms = int(abs(angle) * 1000 / TURN_SPEED_DEG_S) + 2000
+        if self.drive_base:
+            self.drive_base.stop()
+            self.drive_base.turn(angle, wait=False)
+
+    def _resume_drive(self, now_ms):
+        self._reset_debounces()
+        self.state = "DRIVE"
+        self.state_start_ms = now_ms
+        if self.drive_base:
+            self.drive_base.drive(speed=DRIVE_SPEED_MM_S, turn_rate=0)
+
+    def step(self, now_ms, current_zone_val, detected, movement_enabled=True):
+        """
+        Advances movement and zone transition state by one tick.
+        Returns the new zone name if an allowed zone transition occurred, else None.
+        """
+        if movement_enabled and self.state == "BACKUP":
+            if detected == current_zone_val:
+                self.seen_cur_backup = True
+            elif self.seen_cur_backup and detected is not None:
+                # Stop backing up before crossing out the opposite side of the zone
+                self._start_turn(now_ms)
+                return None
+
+            if now_ms - self.state_start_ms >= BACKUP_DURATION_MS:
+                self._start_turn(now_ms)
+            return None
+
+        if movement_enabled and self.state == "TURN":
+            elapsed = now_ms - self.state_start_ms
+            turn_done = self.drive_base is None or (elapsed >= 100 and self.drive_base.done())
+            if turn_done or elapsed >= self.turn_timeout_ms:
+                self._resume_drive(now_ms)
+            return None
+
+        if detected is None:
+            self.pending_zone = None
+            self.pending_count = 0
+            self.disallowed_start_ms = None
+            if movement_enabled and self.has_color_sensor and current_zone_val != "0":
+                if self.edge_start_ms is None:
+                    self.edge_start_ms = now_ms
+                elif now_ms - self.edge_start_ms >= EDGE_CONFIRM_MS:
+                    self._start_backup(now_ms)
+            return None
+
+        self.edge_start_ms = None
+
+        if detected == current_zone_val:
+            self.pending_zone = None
+            self.pending_count = 0
+            self.disallowed_start_ms = None
+            return None
+
+        if is_zone_transition_allowed(current_zone_val, detected, self.agent_type):
+            self.disallowed_start_ms = None
+            if detected == self.pending_zone:
+                self.pending_count += 1
+            else:
+                self.pending_zone = detected
+                self.pending_count = 1
+            if self.pending_count >= ZONE_DEBOUNCE_SAMPLES:
+                self._reset_debounces()
+                return detected
+            return None
+
+        # Disallowed zone border: do not enter; back up and turn away after confirmation
+        self.pending_zone = None
+        self.pending_count = 0
+        if movement_enabled:
+            if self.disallowed_start_ms is None:
+                self.disallowed_start_ms = now_ms
+            elif now_ms - self.disallowed_start_ms >= DISALLOWED_CONFIRM_MS:
+                self._start_backup(now_ms)
+        return None
+
+
+# ==============================================================================
+# 6. MAIN PROGRAM
 # ==============================================================================
 def main():
     global current_zone
@@ -373,15 +552,15 @@ def main():
     print("Time_Stamp,ID,Event,Zone,SIR_State,Contact_ID,Agent_Type,Vaccinated")
     log_sample("Start")
 
-    if ENABLE_MOVEMENT and drive_base:
-        drive_base.drive(speed=200, turn_rate=0)
+    navigator = ZoneNavigator(
+        AGENT_TYPE,
+        drive_base_obj=drive_base,
+        has_color_sensor=(color_sensor is not None),
+    )
+    if ENABLE_MOVEMENT:
+        navigator.start(now_ms=0)
 
     last_log_ms = 0
-    step_start_ms = 0
-    phase = 0  # 0 = straight, 1 = pause, 2 = turn, 3 = pause
-    step_duration_ms = 2000
-    pending_zone = None
-    pending_count = 0
 
     # Run until STOP broadcast on Channel 0 (or LEFT button pressed on hub)
     while True:
@@ -392,25 +571,14 @@ def main():
 
         now_ms = stopwatch.time()
 
-        # 0. Zone detection with 2-sample debounce
+        # 0. Zone detection, strict directional transitions, and slow edge-avoidance movement
         detected = detect_zone(color_sensor)
-        if detected is not None and detected != current_zone:
-            if detected == pending_zone:
-                pending_count += 1
-            else:
-                pending_zone = detected
-                pending_count = 1
-
-            if pending_count >= 2:
-                current_zone = detected
-                pending_zone = None
-                pending_count = 0
-                peer_contact_start.clear()
-                peer_last_seen.clear()
-                log_sample("change_zone")
-        else:
-            pending_zone = None
-            pending_count = 0
+        new_zone = navigator.step(now_ms, current_zone, detected, movement_enabled=ENABLE_MOVEMENT)
+        if new_zone is not None:
+            current_zone = new_zone
+            peer_contact_start.clear()
+            peer_last_seen.clear()
+            log_sample("change_zone")
 
         # 1. Check for co-location infection (3 seconds in same zone as an 'I' robot)
         check_zone_infection(now_ms)
@@ -419,28 +587,6 @@ def main():
         if now_ms - last_log_ms >= 1000:
             log_sample("Sample")
             last_log_ms = now_ms
-
-        # 2. Movement state machine with stochastic timing
-        if ENABLE_MOVEMENT and now_ms - step_start_ms >= step_duration_ms:
-            phase = (phase + 1) % 4
-            step_start_ms = now_ms
-
-            if phase == 0:
-                # Drive straight (random 1.5s - 2.5s)
-                step_duration_ms = random.randint(1500, 2500)
-                if drive_base:
-                    drive_base.drive(speed=200, turn_rate=0)
-            elif phase in (1, 3):
-                # Short pause (0.8s)
-                step_duration_ms = 800
-                if drive_base:
-                    drive_base.stop()
-            elif phase == 2:
-                # Turn (Type A turns right +60 deg/s, Type B turns left -60 deg/s)
-                step_duration_ms = random.randint(800, 1300)
-                turn_rate = 60 if AGENT_TYPE == "A" else -60
-                if drive_base:
-                    drive_base.drive(speed=0, turn_rate=turn_rate)
 
         wait(20)
 
