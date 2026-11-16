@@ -1,5 +1,5 @@
 from pybricks.hubs import PrimeHub
-from pybricks.pupdevices import Motor, ColorSensor
+from pybricks.pupdevices import Motor, ColorSensor, UltrasonicSensor
 from pybricks.parameters import Port, Button, Color, Direction
 from pybricks.robotics import DriveBase
 from pybricks.tools import wait, StopWatch
@@ -14,10 +14,11 @@ import gc
 VACCINATED = "No"           # "Yes" or "No"
 ENABLE_MOVEMENT = True      # Set True to enable driving
 
-# Default motor ports
+# Default motor and sensor ports
 LEFT_MOTOR_PORT = Port.C
 RIGHT_MOTOR_PORT = Port.D
 COLOR_SENSOR_PORT = Port.B
+DISTANCE_SENSOR_PORT = Port.A
 
 # HSV ranges for the 4 zones: (h_min, h_max, s_min, s_max, v_min, v_max)
 # Note: Red wraps around 0/360, handled in detect_zone()
@@ -40,6 +41,9 @@ EDGE_TURN_MIN_DEG = 90
 EDGE_TURN_MAX_DEG = 180
 ZONE_DEBOUNCE_SAMPLES = 3
 DISALLOWED_CONFIRM_MS = 350
+OBSTACLE_STOP_MM = 80      # Back up when an obstacle is closer than 100 mm (10 cm)
+OBSTACLE_RESUME_MM = 100    # Resume driving forward once obstacle clears beyond 120 mm (12 cm)
+OBSTACLE_CLEAR_SAMPLES = 3
 
 # DriveBase wheel dimensions (Standard SPIKE Prime wheels: 56 mm, track: 112 mm)
 WHEEL_DIAMETER = 56
@@ -181,6 +185,24 @@ except Exception:
             pass
 if color_sensor is None:
     print("No ColorSensor found! Zone detection disabled.")
+
+# Setup UltrasonicSensor (Distance Sensor on Port A, graceful fallback if disconnected)
+distance_sensor = None
+try:
+    distance_sensor = UltrasonicSensor(DISTANCE_SENSOR_PORT)
+    print(f"UltrasonicSensor detected on {DISTANCE_SENSOR_PORT}")
+except Exception:
+    print("No UltrasonicSensor found on Port A! Obstacle stopping disabled.")
+
+
+def read_distance_mm(sensor):
+    """Returns distance in mm from UltrasonicSensor, or None if unavailable."""
+    if sensor is None:
+        return None
+    try:
+        return sensor.distance()
+    except Exception:
+        return None
 
 def detect_zone(sensor):
     """
@@ -428,6 +450,8 @@ class ZoneNavigator:
         self.pending_count = 0
         self.edge_start_ms = None
         self.disallowed_start_ms = None
+        self.seen_cur_obstacle_backup = False
+        self.obstacle_clear_count = 0
 
     def start(self, now_ms=0):
         """Configures slow DriveBase settings and begins driving straight."""
@@ -472,11 +496,37 @@ class ZoneNavigator:
         if self.drive_base:
             self.drive_base.drive(speed=DRIVE_SPEED_MM_S, turn_rate=0)
 
-    def step(self, now_ms, current_zone_val, detected, movement_enabled=True):
+    def step(self, now_ms, current_zone_val, detected, movement_enabled=True, distance_mm=None):
         """
         Advances movement and zone transition state by one tick.
         Returns the new zone name if an allowed zone transition occurred, else None.
         """
+        if movement_enabled and self.state == "OBSTACLE_BACKUP":
+            if detected == current_zone_val:
+                self.seen_cur_obstacle_backup = True
+            elif self.seen_cur_obstacle_backup and detected is not None:
+                self._resume_drive(now_ms)
+                return None
+
+            if distance_mm is None or distance_mm >= OBSTACLE_RESUME_MM:
+                self.obstacle_clear_count += 1
+                if self.obstacle_clear_count >= OBSTACLE_CLEAR_SAMPLES:
+                    self.obstacle_clear_count = 0
+                    self._resume_drive(now_ms)
+            else:
+                self.obstacle_clear_count = 0
+            return None
+
+        if movement_enabled and self.state == "DRIVE":
+            if distance_mm is not None and distance_mm < OBSTACLE_STOP_MM:
+                self._reset_debounces()
+                self.state = "OBSTACLE_BACKUP"
+                self.state_start_ms = now_ms
+                self.seen_cur_obstacle_backup = (detected == current_zone_val)
+                self.obstacle_clear_count = 0
+                if self.drive_base:
+                    self.drive_base.drive(speed=-DRIVE_SPEED_MM_S, turn_rate=0)
+                return None
         if movement_enabled and self.state == "BACKUP":
             if detected == current_zone_val:
                 self.seen_cur_backup = True
@@ -573,7 +623,14 @@ def main():
 
         # 0. Zone detection, strict directional transitions, and slow edge-avoidance movement
         detected = detect_zone(color_sensor)
-        new_zone = navigator.step(now_ms, current_zone, detected, movement_enabled=ENABLE_MOVEMENT)
+        distance_mm = read_distance_mm(distance_sensor)
+        new_zone = navigator.step(
+            now_ms,
+            current_zone,
+            detected,
+            movement_enabled=ENABLE_MOVEMENT,
+            distance_mm=distance_mm,
+        )
         if new_zone is not None:
             current_zone = new_zone
             peer_contact_start.clear()

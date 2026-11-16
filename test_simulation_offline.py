@@ -128,8 +128,8 @@ class TestPybricksAgent(unittest.TestCase):
         self.assertEqual(parse_robot_id("Held 10"), 10)
         self.assertEqual(parse_robot_id("", default=1), 1)
 
-        self.assertEqual(config_from_hub_name("Held 1"), (1, "A", True))
-        self.assertEqual(config_from_hub_name("Held 2"), (2, "A", False))
+        self.assertEqual(config_from_hub_name("Held 1"), (1, "A", False))
+        self.assertEqual(config_from_hub_name("Held 2"), (2, "A", True))
         self.assertEqual(config_from_hub_name("Held 4"), (4, "A", False))
         self.assertEqual(config_from_hub_name("Held 5"), (5, "B", False))
         self.assertEqual(config_from_hub_name("Held 10"), (10, "B", False))
@@ -293,6 +293,32 @@ class TestPybricksAgent(unittest.TestCase):
             nav_none.step(i * 20, "White", None)
         self.assertEqual(nav_none.state, "DRIVE")
         self.assertEqual(len(db_none.turns), 0)
+
+        # 4. Distance sensor obstacle backup & forward resume without turning (10 cm threshold)
+        from agent_robot import OBSTACLE_CLEAR_SAMPLES, OBSTACLE_RESUME_MM, OBSTACLE_STOP_MM
+
+        self.assertEqual(OBSTACLE_STOP_MM, 100)
+        db_obs = FakeDriveBase()
+        nav_obs = ZoneNavigator("A", drive_base_obj=db_obs, has_color_sensor=True)
+        nav_obs.start(now_ms=0)
+
+        # Obstacle detected closer than 100 mm -> backs up without turning
+        nav_obs.step(20, "White", "White", distance_mm=OBSTACLE_STOP_MM - 10)
+        self.assertEqual(nav_obs.state, "OBSTACLE_BACKUP")
+        self.assertEqual(db_obs.drives[-1], (-DRIVE_SPEED_MM_S, 0))
+        self.assertEqual(len(db_obs.turns), 0)
+
+        # Still inside hysteresis band (< 120 mm) -> keeps backing up
+        nav_obs.step(40, "White", "White", distance_mm=OBSTACLE_RESUME_MM - 5)
+        self.assertEqual(nav_obs.state, "OBSTACLE_BACKUP")
+        self.assertEqual(db_obs.drives[-1], (-DRIVE_SPEED_MM_S, 0))
+
+        # Obstacle cleared (>= 120 mm) for OBSTACLE_CLEAR_SAMPLES -> continues forward without turning
+        for i in range(OBSTACLE_CLEAR_SAMPLES):
+            nav_obs.step(60 + i * 20, "White", "White", distance_mm=OBSTACLE_RESUME_MM)
+        self.assertEqual(nav_obs.state, "DRIVE")
+        self.assertEqual(db_obs.drives[-1], (DRIVE_SPEED_MM_S, 0))
+        self.assertEqual(len(db_obs.turns), 0)
 
 
 if __name__ == "__main__":
