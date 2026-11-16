@@ -116,6 +116,23 @@ class TestPybricksAgent(unittest.TestCase):
             with open(saved_path, "r") as f:
                 saved_data = json.load(f)
             self.assertEqual(len(saved_data), 3)
+            by_id = {row["ID"]: row for row in saved_data}
+            self.assertEqual(by_id[1]["Agent_Type"], "A")
+            self.assertEqual(by_id[2]["Agent_Type"], "A")
+            self.assertEqual(by_id[10]["Agent_Type"], "B")
+
+    def test_config_from_hub_name(self):
+        from agent_robot import config_from_hub_name, parse_robot_id
+
+        self.assertEqual(parse_robot_id("Held 1"), 1)
+        self.assertEqual(parse_robot_id("Held 10"), 10)
+        self.assertEqual(parse_robot_id("", default=1), 1)
+
+        self.assertEqual(config_from_hub_name("Held 1"), (1, "A", True))
+        self.assertEqual(config_from_hub_name("Held 2"), (2, "A", False))
+        self.assertEqual(config_from_hub_name("Held 4"), (4, "A", False))
+        self.assertEqual(config_from_hub_name("Held 5"), (5, "B", False))
+        self.assertEqual(config_from_hub_name("Held 10"), (10, "B", False))
 
 
 if __name__ == "__main__":

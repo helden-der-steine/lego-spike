@@ -6,13 +6,14 @@ from pybricks.tools import wait, StopWatch
 from pybricks.geometry import Matrix
 import random
 import json
+try:
+    import ure as re
+except ImportError:
+    import re
 
 # ==============================================================================
-# 1. SETTINGS (Change these for each robot: ROBOT_ID = 1..10)
+# 1. SETTINGS (Automatically derived from Hub Name: "Held 1", "Held 2", ...)
 # ==============================================================================
-ROBOT_ID = 1                # 1..10 (Robot broadcasts on Channel ROBOT_ID)
-AGENT_TYPE = "A"            # "A" (turns right) or "B" (turns left)
-INITIAL_INFECTED = False    # True = "I" (Red), False = "S" (Blue)
 VACCINATED = "No"           # "Yes" or "No"
 
 # Default motor ports
@@ -29,10 +30,51 @@ AXLE_TRACK = 112
 # - Each robot broadcasts telemetry on its own channel: ROBOT_ID (1..10)
 # ==============================================================================
 CONTROL_CHANNEL = 0
-BROADCAST_CHANNEL = ROBOT_ID
-
 CMD_START = 1
 CMD_STOP = 2
+
+
+def get_hub_name(hub_obj):
+    """Returns the hub's Bluetooth name across Pybricks versions."""
+    try:
+        info = hub_obj.system.info()
+        if isinstance(info, dict) and info.get("name"):
+            return info["name"]
+    except Exception:
+        pass
+    try:
+        name = hub_obj.system.name()
+        if isinstance(name, str) and name:
+            return name
+    except Exception:
+        pass
+    return ""
+
+
+def parse_robot_id(hub_name, default=1):
+    """Extracts the robot number from a hub name like 'Held 1', 'Held 10', etc."""
+    if not isinstance(hub_name, str):
+        return default
+    match = re.search(r"(\d+)", hub_name)
+    return int(match.group(1)) if match else default
+
+
+def config_from_hub_name(hub_name, default_id=1):
+    """
+    Derives (ROBOT_ID, AGENT_TYPE, INITIAL_INFECTED) from the hub name:
+    - Held 1..4  -> Movement A (turns right), Held 5+ -> Movement B (turns left)
+    - Held 1     -> Infected at start (True), others -> Susceptible (False)
+    """
+    robot_id = parse_robot_id(hub_name, default=default_id)
+    agent_type = "B" if robot_id >= 5 else "A"
+    initial_infected = (robot_id == 1)
+    return robot_id, agent_type, initial_infected
+
+
+_probe_hub = PrimeHub()
+HUB_NAME = get_hub_name(_probe_hub)
+ROBOT_ID, AGENT_TYPE, INITIAL_INFECTED = config_from_hub_name(HUB_NAME)
+BROADCAST_CHANNEL = ROBOT_ID
 
 # ==============================================================================
 # 2. 5x5 DISPLAY ICONS (Matrix pixel brightness 0 to 100)
