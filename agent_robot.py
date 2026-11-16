@@ -6,6 +6,7 @@ from pybricks.tools import wait, StopWatch
 from pybricks.geometry import Matrix
 import random
 import json
+import gc
 
 # ==============================================================================
 # 1. SETTINGS (Automatically derived from Hub Name: "Held 1", "Held 2", ...)
@@ -85,10 +86,12 @@ def config_from_hub_name(hub_name, default_id=1):
     return robot_id, agent_type, initial_infected
 
 
-_probe_hub = PrimeHub()
+_probe_hub = PrimeHub(observe_channels=list(range(0, MAX_ROBOTS + 1)))
 HUB_NAME = get_hub_name(_probe_hub)
 ROBOT_ID, AGENT_TYPE, INITIAL_INFECTED = config_from_hub_name(HUB_NAME)
 BROADCAST_CHANNEL = ROBOT_ID
+del _probe_hub
+gc.collect()
 
 # ==============================================================================
 # 2. 5x5 DISPLAY ICONS (Matrix pixel brightness 0 to 100)
@@ -295,15 +298,22 @@ def check_zone_infection(now_ms):
                 peer_contact_start.pop(ch, None)
                 peer_last_seen.pop(ch, None)
 
+_observe_error_logged = False
+
+
 def check_laptop_command():
     """
     Observes BLE broadcast Channel 0 from the laptop:
     - CMD_START (1 or "START") -> Start experiment
     - CMD_STOP  (2 or "STOP")  -> Stop experiment
     """
+    global _observe_error_logged
     try:
         obs = hub.ble.observe(CONTROL_CHANNEL)
-    except Exception:
+    except Exception as e:
+        if not _observe_error_logged:
+            print(f"[ROBOT {ROBOT_ID}] BLE observe(Ch {CONTROL_CHANNEL}) error: {e}")
+            _observe_error_logged = True
         obs = None
 
     if obs is not None:
