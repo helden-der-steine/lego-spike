@@ -278,10 +278,11 @@ class CentralHub:
         self.run_started = True
 
         time_str = datetime.now().strftime("%H:%M:%S")
+        event_str = f" | Event: {entry['Event']}" if entry["Event"] != "Sample" else ""
         print(
             f"[{time_str}] 📡 Ch {entry['ID']:2d} | Robot {entry['ID']} | "
             f"t={entry['Time_Stamp']:5.1f}s | State: {entry['SIR_State']:1} | "
-            f"Zone: {entry['Zone']} | Type: {entry['Agent_Type']}"
+            f"Zone: {entry['Zone']} | Type: {entry['Agent_Type']}{event_str}"
         )
 
     def handle_broadcast_packet(self, channel: int, values: list):
@@ -305,19 +306,24 @@ class CentralHub:
                 )
             return
 
-        # Case 2: Telemetry tuple: (robot_id, elapsed_s, sir_state, zone, seq_num)
+        # Case 2: Telemetry tuple: (robot_id, elapsed_s, sir_state, zone, seq_num[, event_code])
         if len(values) >= 4 and not isinstance(values[0], str):
             robot_id = int(values[0])
             elapsed_s = float(values[1])
             sir_state = str(values[2])
             zone = str(values[3])
             seq_num = int(values[4]) if len(values) >= 5 else None
+            event_code = str(values[5]) if len(values) >= 6 else "S"
+            event_name = (
+                "change_zone" if event_code == "Z"
+                else ("Infection" if event_code == "I" else ("Start" if event_code == "A" else "Sample"))
+            )
 
             self.record_entry(
                 {
                     "Time_Stamp": elapsed_s,
                     "ID": robot_id,
-                    "Event": "Sample",
+                    "Event": event_name,
                     "Zone": zone,
                     "SIR_State": sir_state,
                     "Contact_ID": "—",
