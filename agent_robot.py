@@ -22,7 +22,7 @@ ROBOT_STATS = [
     {"agent_type": "A", "initial_infected": True,  "vaccinated": "No"},  # Robot 2
     {"agent_type": "A", "initial_infected": False, "vaccinated": "No"},  # Robot 3
     {"agent_type": "A", "initial_infected": False, "vaccinated": "No"},  # Robot 4
-    {"agent_type": "B", "initial_infected": False, "vaccinated": "No"},  # Robot 5
+    {"agent_type": "A", "initial_infected": False, "vaccinated": "No"},  # Robot 5
     {"agent_type": "B", "initial_infected": False, "vaccinated": "No"},  # Robot 6
     {"agent_type": "B", "initial_infected": False, "vaccinated": "No"},  # Robot 7
     {"agent_type": "B", "initial_infected": False, "vaccinated": "No"},  # Robot 8
@@ -74,7 +74,21 @@ CONTROL_CHANNEL = 0
 CMD_START = 1
 CMD_STOP = 2
 MAX_ROBOTS = 10
-INFECTION_CONTACT_MS = 3000  # Co-location duration in ms before infection spreads
+
+# Infection states
+STATE_SUSCEPTIBLE = "S"
+STATE_INFECTED = "I"
+STATE_RECOVERED = "R"
+STATE_VACCINATED = "V"  # Defined for state support; no vaccination behavior yet
+
+INFECTION_CONTACT_MS = 30000        # Co-location duration in ms (30s) before infection can occur
+INFECTION_CHECK_INTERVAL_MS = 1000  # Roll for infection once every 1s after threshold
+INFECTION_PROB_PER_SEC = 0.05       # Probability of infection per second after 30s contact
+
+LOG_INTERVAL_MS = 5000              # Periodic snapshot log interval in ms (5.0 s)
+PEER_CONTACT_TIMEOUT_MS = 2500      # Drop zone-contact timer if peer silent > 2.5s
+PEER_STATE_TIMEOUT_MS = 15000       # Expire peer SIR state if silent > 15s (3x log interval)
+NO_INFECTED_END_MS = 3000           # Confirm 0 infected robots for 3s before ending simulation
 
 
 def get_hub_name(hub_obj):
@@ -159,6 +173,14 @@ ICON_R = Matrix([
     [100,   0,   0,   0, 100],
 ])
 
+ICON_V = Matrix([
+    [100,   0,   0,   0, 100],
+    [100,   0,   0,   0, 100],
+    [100,   0,   0,   0, 100],
+    [  0, 100,   0, 100,   0],
+    [  0,   0, 100,   0,   0],
+])
+
 # ==============================================================================
 # 3. INITIALIZATION
 # ==============================================================================
@@ -167,13 +189,18 @@ PEER_CHANNELS = [ch for ch in range(1, MAX_ROBOTS + 1) if ch != BROADCAST_CHANNE
 OBSERVE_CHANNELS = [CONTROL_CHANNEL] + PEER_CHANNELS
 hub = PrimeHub(broadcast_channel=BROADCAST_CHANNEL, observe_channels=OBSERVE_CHANNELS)
 
-sir_state = "I" if INITIAL_INFECTED else "S"
+sir_state = STATE_INFECTED if INITIAL_INFECTED else STATE_SUSCEPTIBLE
 current_zone = "0"
 log_entries = []
 seq_num = 0
 stopwatch = StopWatch()
 peer_contact_start = {}
 peer_last_seen = {}
+peer_last_roll = {}
+peer_states = {}
+peer_zones = {}
+ever_saw_infected = (sir_state == STATE_INFECTED)
+no_infected_since = None
 
 # Setup Motors and DriveBase (graceful fallback if disconnected during bench testing)
 drive_base = None
@@ -265,13 +292,16 @@ def detect_zone(sensor):
 
 def show_state(state):
     """Updates hub status light and 5x5 matrix icon."""
-    if state == "I":
+    if state == STATE_INFECTED:
         hub.light.on(Color.RED)
         hub.display.icon(ICON_I)
-    elif state == "R":
+    elif state == STATE_RECOVERED:
         hub.light.on(Color.GREEN)
         hub.display.icon(ICON_R)
-    else:  # "S"
+    elif state == STATE_VACCINATED:
+        hub.light.on(Color.CYAN)
+        hub.display.icon(ICON_V)
+    else:  # STATE_SUSCEPTIBLE
         hub.light.on(Color.BLUE)
         hub.display.icon(ICON_S)
 
@@ -311,17 +341,21 @@ def log_sample(event_name="Sample", contact_id="—"):
         pass
 
 
-def check_zone_infection(now_ms):
-    """
-    Checks peer robot BLE broadcasts. If this robot is susceptible ('S') and
-    shares the same valid zone with an infected robot ('I') for at least
-    INFECTION_CONTACT_MS (3000 ms), this robot becomes infected ('I').
-    """
-    global sir_state
-    if sir_state != "S" or current_zone == "0":
+def _clear_peer_contact(other_id=None):
+    """Clears co-location contact timers for one peer, or all peers if `other_id` is None."""
+    if other_id is None:
         peer_contact_start.clear()
-        peer_last_seen.clear()
-        return
+        peer_last_roll.clear()
+    else:
+        peer_contact_start.pop(other_id, None)
+        peer_last_roll.pop(other_id, None)
+
+
+def observe_peers(now_ms):
+    """Updates observed peer states/zones from BLE channels and expires stale entries."""
+    global ever_saw_infected
+    if sir_state == STATE_INFECTED:
+        ever_saw_infected = True
 
     for ch in PEER_CHANNELS:
         try:
@@ -333,27 +367,91 @@ def check_zone_infection(now_ms):
             other_id = obs[0]
             other_state = obs[2]
             other_zone = obs[3]
+            peer_states[other_id] = other_state
+            peer_zones[other_id] = other_zone
+            peer_last_seen[other_id] = now_ms
+            if other_state == STATE_INFECTED:
+                ever_saw_infected = True
+        else:
+            if ch in peer_contact_start and now_ms - peer_last_seen.get(ch, now_ms) > PEER_CONTACT_TIMEOUT_MS:
+                _clear_peer_contact(ch)
+            if ch in peer_states and now_ms - peer_last_seen.get(ch, now_ms) > PEER_STATE_TIMEOUT_MS:
+                peer_states.pop(ch, None)
+                peer_zones.pop(ch, None)
+                peer_last_seen.pop(ch, None)
 
-            if other_state == "I" and other_zone == current_zone:
-                peer_last_seen[other_id] = now_ms
-                if other_id not in peer_contact_start:
-                    peer_contact_start[other_id] = now_ms
-                elif now_ms - peer_contact_start[other_id] >= INFECTION_CONTACT_MS:
-                    sir_state = "I"
+
+def has_any_infected():
+    """Returns True if this robot or any active peer is currently in STATE_INFECTED."""
+    if sir_state == STATE_INFECTED:
+        return True
+    for state in peer_states.values():
+        if state == STATE_INFECTED:
+            return True
+    return False
+
+
+def is_simulation_finished(now_ms):
+    """
+    Returns True once at least one robot was infected during this run,
+    no robot remains infected, and that condition holds for NO_INFECTED_END_MS.
+    """
+    global no_infected_since
+    if not ever_saw_infected or has_any_infected():
+        no_infected_since = None
+        return False
+
+    if no_infected_since is None:
+        no_infected_since = now_ms
+        return False
+
+    return (now_ms - no_infected_since) >= NO_INFECTED_END_MS
+
+
+def check_zone_infection(now_ms):
+    """
+    Checks peer robot BLE broadcasts. If this robot is susceptible (STATE_SUSCEPTIBLE)
+    and shares the same valid zone with an infected robot (STATE_INFECTED) for at least
+    INFECTION_CONTACT_MS (30s), it becomes infected (STATE_INFECTED) with probability
+    INFECTION_PROB_PER_SEC (0.05) each second.
+    """
+    global sir_state, ever_saw_infected
+    observe_peers(now_ms)
+
+    if sir_state != STATE_SUSCEPTIBLE or current_zone == "0":
+        _clear_peer_contact()
+        return
+
+    for other_id, other_state in list(peer_states.items()):
+        if now_ms - peer_last_seen.get(other_id, now_ms) > PEER_CONTACT_TIMEOUT_MS:
+            _clear_peer_contact(other_id)
+            continue
+
+        other_zone = peer_zones.get(other_id)
+        if other_state == STATE_INFECTED and other_zone == current_zone:
+            if other_id not in peer_contact_start:
+                peer_contact_start[other_id] = now_ms
+            elif now_ms - peer_contact_start[other_id] >= INFECTION_CONTACT_MS:
+                last_roll = peer_last_roll.get(other_id)
+                if last_roll is None:
+                    peer_last_roll[other_id] = now_ms
+                    should_roll = True
+                elif now_ms - last_roll >= INFECTION_CHECK_INTERVAL_MS:
+                    peer_last_roll[other_id] = last_roll + INFECTION_CHECK_INTERVAL_MS
+                    should_roll = True
+                else:
+                    should_roll = False
+
+                if should_roll and random.random() < INFECTION_PROB_PER_SEC:
+                    sir_state = STATE_INFECTED
+                    ever_saw_infected = True
                     show_state(sir_state)
                     hub.speaker.beep(frequency=600, duration=150)
-                    peer_contact_start.clear()
-                    peer_last_seen.clear()
+                    _clear_peer_contact()
                     log_sample("Infection", contact_id=other_id)
                     return
-            else:
-                peer_contact_start.pop(other_id, None)
-                peer_last_seen.pop(other_id, None)
         else:
-            # Expire stale contact timers if no packet seen from this peer for > 2.5s
-            if ch in peer_contact_start and now_ms - peer_last_seen.get(ch, now_ms) > 2500:
-                peer_contact_start.pop(ch, None)
-                peer_last_seen.pop(ch, None)
+            _clear_peer_contact(other_id)
 
 _observe_error_logged = False
 
@@ -614,8 +712,15 @@ class ZoneNavigator:
 # 6. MAIN PROGRAM
 # ==============================================================================
 def main():
-    global current_zone
+    global current_zone, ever_saw_infected, no_infected_since
     wait_for_start()
+
+    _clear_peer_contact()
+    peer_last_seen.clear()
+    peer_states.clear()
+    peer_zones.clear()
+    ever_saw_infected = (sir_state == STATE_INFECTED)
+    no_infected_since = None
 
     initial_zone = detect_zone(color_sensor)
     if initial_zone is not None:
@@ -655,15 +760,19 @@ def main():
         )
         if new_zone is not None:
             current_zone = new_zone
-            peer_contact_start.clear()
-            peer_last_seen.clear()
+            _clear_peer_contact()
             log_sample("change_zone")
 
-        # 1. Check for co-location infection (3 seconds in same zone as an 'I' robot)
+        # 1. Check for co-location infection (30s in same zone as an 'I' robot, then 0.05/s)
         check_zone_infection(now_ms)
 
-        # 2. Periodic snapshot log every 1000 ms (1.0 s)
-        if now_ms - last_log_ms >= 1000:
+        # 2. End simulation if no robot remains infected
+        if is_simulation_finished(now_ms):
+            print(f"[ROBOT {ROBOT_ID}] No infected robots remaining! Ending simulation...")
+            break
+
+        # 3. Periodic snapshot log every 5000 ms (5.0 s)
+        if now_ms - last_log_ms >= LOG_INTERVAL_MS:
             log_sample("Sample")
             last_log_ms = now_ms
 
