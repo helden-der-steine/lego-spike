@@ -184,14 +184,14 @@ class TestPybricksAgent(unittest.TestCase):
             self.assertTrue(is_zone_transition_allowed("0", z, "A"))
             self.assertTrue(is_zone_transition_allowed("0", z, "B"))
 
-        # Edge turn angles: 90..180 deg, clockwise (+) for A, counter-clockwise (-) for B
+        # Edge turn angles: 45..110 deg, clockwise (+) for A, counter-clockwise (-) for B
         for _ in range(50):
             ang_a = pick_edge_turn_angle("A")
-            self.assertGreaterEqual(ang_a, 90)
-            self.assertLessEqual(ang_a, 180)
+            self.assertGreaterEqual(ang_a, 45)
+            self.assertLessEqual(ang_a, 110)
             ang_b = pick_edge_turn_angle("B")
-            self.assertLessEqual(ang_b, -90)
-            self.assertGreaterEqual(ang_b, -180)
+            self.assertLessEqual(ang_b, -45)
+            self.assertGreaterEqual(ang_b, -110)
 
     def test_zone_navigator_transitions_and_edge_bounces(self):
         from agent_robot import (
@@ -226,7 +226,7 @@ class TestPybricksAgent(unittest.TestCase):
             def stop(self):
                 self.stops += 1
 
-        # 1. Type A moves Yellow -> Blue, rejects Yellow -> Red (turns +90..+180)
+        # 1. Type A moves Yellow -> Blue, rejects Yellow -> Red (turns +45..+110)
         db_a = FakeDriveBase()
         nav_a = ZoneNavigator("A", drive_base_obj=db_a, has_color_sensor=True)
         nav_a.start(now_ms=0)
@@ -242,14 +242,14 @@ class TestPybricksAgent(unittest.TestCase):
         self.assertEqual(nav_a.state, "BACKUP")
         self.assertEqual(db_a.drives[-1], (-DRIVE_SPEED_MM_S, 0))
 
-        # Complete backup -> enters TURN with +90..+180 deg
+        # Complete backup -> enters TURN with +45..+110 deg
         t += BACKUP_DURATION_MS
         nav_a.step(t, "Yellow", "Yellow")
         self.assertEqual(nav_a.state, "TURN")
         self.assertEqual(len(db_a.turns), 1)
         turn_angle, wait_flag = db_a.turns[-1]
         self.assertFalse(wait_flag)
-        self.assertTrue(90 <= turn_angle <= 180)
+        self.assertTrue(45 <= turn_angle <= 110)
 
         # Complete turn -> resumes slow forward drive
         db_a.is_done = True
@@ -280,7 +280,7 @@ class TestPybricksAgent(unittest.TestCase):
             res = nav_a.step(t + 140 + i * 20, "Green", "Red")
         self.assertEqual(res, "Red")
 
-        # 2. Type B hitting outer edge (None for >= EDGE_CONFIRM_MS) backs up, turns -90..-180,
+        # 2. Type B hitting outer edge (None for >= EDGE_CONFIRM_MS) backs up, turns -45..-110,
         #    and stops backup early if crossing back out
         db_b = FakeDriveBase()
         nav_b = ZoneNavigator("B", drive_base_obj=db_b, has_color_sensor=True)
@@ -296,7 +296,7 @@ class TestPybricksAgent(unittest.TestCase):
         t += 20
         nav_b.step(t, "Red", "Yellow")
         self.assertEqual(nav_b.state, "TURN")
-        self.assertTrue(-180 <= db_b.turns[-1][0] <= -90)
+        self.assertTrue(-110 <= db_b.turns[-1][0] <= -45)
 
         # 3. No color sensor: None must not trigger edge bounces
         db_none = FakeDriveBase()
@@ -307,16 +307,16 @@ class TestPybricksAgent(unittest.TestCase):
         self.assertEqual(nav_none.state, "DRIVE")
         self.assertEqual(len(db_none.turns), 0)
 
-        # 4. Distance sensor obstacle stop, backup, and turn away (150 mm / 190 mm thresholds)
+        # 4. Distance sensor obstacle stop, backup, and turn away (80 mm / 100 mm thresholds)
         from agent_robot import OBSTACLE_CLEAR_SAMPLES, OBSTACLE_RESUME_MM, OBSTACLE_STOP_MM
 
-        self.assertEqual(OBSTACLE_STOP_MM, 150)
-        self.assertEqual(OBSTACLE_RESUME_MM, 190)
+        self.assertEqual(OBSTACLE_STOP_MM, 80)
+        self.assertEqual(OBSTACLE_RESUME_MM, 100)
         db_obs = FakeDriveBase()
         nav_obs = ZoneNavigator("A", drive_base_obj=db_obs, has_color_sensor=True)
         nav_obs.start(now_ms=0)
 
-        # Obstacle detected closer than 150 mm -> stops immediately and backs up
+        # Obstacle detected closer than 80 mm -> stops immediately and backs up
         stops_before = db_obs.stops
         nav_obs.step(20, "White", "White", distance_mm=OBSTACLE_STOP_MM - 10)
         self.assertEqual(nav_obs.state, "OBSTACLE_BACKUP")
@@ -324,17 +324,17 @@ class TestPybricksAgent(unittest.TestCase):
         self.assertEqual(db_obs.drives[-1], (-DRIVE_SPEED_MM_S, 0))
         self.assertEqual(len(db_obs.turns), 0)
 
-        # Still inside hysteresis band (< 190 mm) -> keeps backing up
+        # Still inside hysteresis band (< 100 mm) -> keeps backing up
         nav_obs.step(40, "White", "White", distance_mm=OBSTACLE_RESUME_MM - 5)
         self.assertEqual(nav_obs.state, "OBSTACLE_BACKUP")
         self.assertEqual(db_obs.drives[-1], (-DRIVE_SPEED_MM_S, 0))
 
-        # Obstacle cleared (>= 190 mm) for OBSTACLE_CLEAR_SAMPLES -> transitions to TURN away
+        # Obstacle cleared (>= 100 mm) for OBSTACLE_CLEAR_SAMPLES -> transitions to TURN away
         for i in range(OBSTACLE_CLEAR_SAMPLES):
             nav_obs.step(60 + i * 20, "White", "White", distance_mm=OBSTACLE_RESUME_MM)
         self.assertEqual(nav_obs.state, "TURN")
         self.assertEqual(len(db_obs.turns), 1)
-        self.assertTrue(90 <= db_obs.turns[-1][0] <= 180)
+        self.assertTrue(45 <= db_obs.turns[-1][0] <= 110)
 
         # Complete turn -> resumes forward drive
         db_obs.is_done = True
