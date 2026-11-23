@@ -374,7 +374,9 @@ class CentralHub:
             event_code = str(values[5]) if len(values) >= 6 else "S"
             event_name = (
                 "change_zone" if event_code == "Z"
-                else ("Infection" if event_code == "I" else ("Start" if event_code == "A" else "Sample"))
+                else ("Infection" if event_code == "I"
+                else ("Recovery" if event_code == "R"
+                else ("Start" if event_code == "A" else "Sample")))
             )
 
             stats = get_robot_stats(robot_id)
