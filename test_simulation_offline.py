@@ -43,10 +43,10 @@ from live_ble_receiver import (
 
 class TestPybricksAgent(unittest.TestCase):
     def test_icons_dimensions(self):
-        from agent_robot import ICON_I, ICON_S, ICON_R, CONTROL_CHANNEL
+        from agent_robot import ICON_I, ICON_S, ICON_R, ICON_V, CONTROL_CHANNEL
 
         self.assertEqual(CONTROL_CHANNEL, 0)
-        for name, icon in [("ICON_I", ICON_I), ("ICON_S", ICON_S), ("ICON_R", ICON_R)]:
+        for name, icon in [("ICON_I", ICON_I), ("ICON_S", ICON_S), ("ICON_R", ICON_R), ("ICON_V", ICON_V)]:
             self.assertEqual(len(icon.grid), 5, f"{name} must have 5 rows")
             for row in icon.grid:
                 self.assertEqual(len(row), 5, f"Each row in {name} must have 5 columns")
@@ -332,6 +332,97 @@ class TestPybricksAgent(unittest.TestCase):
         self.assertEqual(nav_obs.state, "DRIVE")
         self.assertEqual(db_obs.drives[-1], (DRIVE_SPEED_MM_S, 0))
         self.assertEqual(len(db_obs.turns), 0)
+
+    def test_logging_interval_and_infection_timing(self):
+        import agent_robot as ar
+
+        self.assertEqual(ar.LOG_INTERVAL_MS, 5000)
+        self.assertEqual(ar.INFECTION_CONTACT_MS, 30000)
+        self.assertEqual(ar.INFECTION_CHECK_INTERVAL_MS, 1000)
+        self.assertEqual(ar.INFECTION_PROB_PER_SEC, 0.05)
+        self.assertEqual(
+            (ar.STATE_SUSCEPTIBLE, ar.STATE_INFECTED, ar.STATE_RECOVERED, ar.STATE_VACCINATED),
+            ("S", "I", "R", "V"),
+        )
+
+        orig_observe = ar.hub.ble.observe
+        orig_random = ar.random.random
+        orig_time = ar.stopwatch.time
+        try:
+            ar._clear_peer_contact()
+            ar.peer_last_seen.clear()
+            ar.peer_states.clear()
+            ar.peer_zones.clear()
+            ar.ever_saw_infected = False
+            ar.no_infected_since = None
+            ar.current_zone = "Red"
+            ar.sir_state = ar.STATE_SUSCEPTIBLE
+            ar.stopwatch.time = lambda: 31000
+            ar.hub.ble.observe = lambda ch: (2, 1.0, ar.STATE_INFECTED, "Red", 1) if ch == 2 else None
+
+            ar.random.random = lambda: 0.0
+            ar.check_zone_infection(0)
+            ar.check_zone_infection(29999)
+            self.assertEqual(ar.sir_state, ar.STATE_SUSCEPTIBLE)
+
+            ar.random.random = lambda: 0.99
+            ar.check_zone_infection(30000)
+            self.assertEqual(ar.sir_state, ar.STATE_SUSCEPTIBLE)
+
+            ar.random.random = lambda: 0.0
+            ar.check_zone_infection(30500)
+            self.assertEqual(ar.sir_state, ar.STATE_SUSCEPTIBLE)
+
+            ar.check_zone_infection(31000)
+            self.assertEqual(ar.sir_state, ar.STATE_INFECTED)
+        finally:
+            ar.hub.ble.observe = orig_observe
+            ar.random.random = orig_random
+            ar.stopwatch.time = orig_time
+
+    def test_simulation_ends_when_no_infected_remain(self):
+        import agent_robot as ar
+
+        orig_observe = ar.hub.ble.observe
+        try:
+            ar._clear_peer_contact()
+            ar.peer_last_seen.clear()
+            ar.peer_states.clear()
+            ar.peer_zones.clear()
+            ar.sir_state = ar.STATE_SUSCEPTIBLE
+            ar.ever_saw_infected = False
+            ar.no_infected_since = None
+
+            # Never saw an infected robot -> must NOT end
+            ar.hub.ble.observe = lambda ch: None
+            ar.observe_peers(0)
+            self.assertFalse(ar.is_simulation_finished(60000))
+
+            # Peer 2 is infected -> simulation stays active
+            ar.hub.ble.observe = lambda ch: (2, 1.0, ar.STATE_INFECTED, "Red", 1) if ch == 2 else None
+            ar.observe_peers(1000)
+            self.assertTrue(ar.ever_saw_infected)
+            self.assertFalse(ar.is_simulation_finished(1000))
+
+            # Peer 2 recovers -> finishes after NO_INFECTED_END_MS confirmation
+            ar.hub.ble.observe = lambda ch: (2, 5.0, ar.STATE_RECOVERED, "Red", 2) if ch == 2 else None
+            ar.observe_peers(2000)
+            self.assertFalse(ar.is_simulation_finished(2000))
+            self.assertFalse(ar.is_simulation_finished(2000 + ar.NO_INFECTED_END_MS - 1))
+            self.assertTrue(ar.is_simulation_finished(2000 + ar.NO_INFECTED_END_MS))
+
+            # CentralHub also detects end of simulation when all robots are non-infected
+            with tempfile.TemporaryDirectory() as tmpdir:
+                chub = CentralHub(output_dir=tmpdir)
+                chub.handle_broadcast_packet(1, [1, 0.0, "S", "White", 1])
+                chub.handle_broadcast_packet(2, [2, 0.0, "I", "Red", 1])
+                self.assertFalse(chub.is_simulation_finished(now=100.0, confirm_s=5.0))
+                chub.handle_broadcast_packet(2, [2, 5.0, "R", "Red", 2])
+                self.assertFalse(chub.is_simulation_finished(now=105.0, confirm_s=5.0))
+                self.assertFalse(chub.is_simulation_finished(now=109.9, confirm_s=5.0))
+                self.assertTrue(chub.is_simulation_finished(now=110.0, confirm_s=5.0))
+        finally:
+            ar.hub.ble.observe = orig_observe
 
 
 if __name__ == "__main__":
