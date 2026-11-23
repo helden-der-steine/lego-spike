@@ -53,12 +53,12 @@ DRIVE_SPEED_MM_S = 35       # Very slow forward/backup speed (mm/s)
 TURN_SPEED_DEG_S = 45       # Slow in-place turn speed (deg/s)
 EDGE_CONFIRM_MS = 400       # Cross touching zone seams (~14 mm) before treating None as dark table edge
 BACKUP_DURATION_MS = 1000   # Max reverse time (~35 mm) when backing away from an edge/disallowed zone
-EDGE_TURN_MIN_DEG = 90
-EDGE_TURN_MAX_DEG = 180
+EDGE_TURN_MIN_DEG = 45
+EDGE_TURN_MAX_DEG = 110
 ZONE_DEBOUNCE_SAMPLES = 3
 DISALLOWED_CONFIRM_MS = 350
-OBSTACLE_STOP_MM = 150      # Stop, back up, and turn when an obstacle is closer than 150 mm (15 cm)
-OBSTACLE_RESUME_MM = 190    # Finish backing up and turn once obstacle clears beyond 190 mm (19 cm)
+OBSTACLE_STOP_MM = 80       # Stop, back up, and turn when an obstacle is closer than 80 mm (8 cm)
+OBSTACLE_RESUME_MM = 100    # Finish backing up and turn once obstacle clears beyond 100 mm (10 cm)
 OBSTACLE_CLEAR_SAMPLES = 3
 
 # DriveBase wheel dimensions (Standard SPIKE Prime wheels: 56 mm, track: 112 mm)
@@ -571,9 +571,9 @@ def is_zone_transition_allowed(current, detected, agent_type):
 
 def pick_edge_turn_angle(agent_type):
     """
-    Picks a random 90-180 degree turn angle:
-    - Type A turns clockwise (+90..+180)
-    - Type B turns counter-clockwise (-90..-180)
+    Picks a random 45-110 degree turn angle:
+    - Type A turns clockwise (+45..+110)
+    - Type B turns counter-clockwise (-45..-110)
     """
     angle = random.randint(EDGE_TURN_MIN_DEG, EDGE_TURN_MAX_DEG)
     return angle if agent_type == "A" else -angle
@@ -583,7 +583,7 @@ class ZoneNavigator:
     """
     Drives slowly inside the current zone, allows transitions ONLY into the
     next zone in the configured direction (A: clockwise, B: counter-clockwise),
-    and backs up + turns 90-180 deg when hitting an edge or disallowed zone.
+    and backs up + turns 45-110 deg when hitting an edge or disallowed zone.
     """
 
     def __init__(self, agent_type, drive_base_obj=None, has_color_sensor=True):
