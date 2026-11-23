@@ -159,10 +159,10 @@ class TestPybricksAgent(unittest.TestCase):
 
         self.assertTrue(ENABLE_MOVEMENT)
         self.assertLessEqual(DRIVE_SPEED_MM_S, 50)
-        self.assertEqual(ZONE_ORDER_CW, ("White", "Blue", "Green", "Red"))
+        self.assertEqual(ZONE_ORDER_CW, ("Yellow", "Blue", "Green", "Red"))
 
         # Type A: strictly clockwise
-        cw_pairs = [("White", "Blue"), ("Blue", "Green"), ("Green", "Red"), ("Red", "White")]
+        cw_pairs = [("Yellow", "Blue"), ("Blue", "Green"), ("Green", "Red"), ("Red", "Yellow")]
         for cur, nxt in cw_pairs:
             self.assertEqual(get_allowed_next_zone(cur, "A"), nxt)
             self.assertTrue(is_zone_transition_allowed(cur, nxt, "A"))
@@ -171,7 +171,7 @@ class TestPybricksAgent(unittest.TestCase):
                     self.assertFalse(is_zone_transition_allowed(cur, other, "A"))
 
         # Type B: strictly counter-clockwise
-        ccw_pairs = [("White", "Red"), ("Red", "Green"), ("Green", "Blue"), ("Blue", "White")]
+        ccw_pairs = [("Yellow", "Red"), ("Red", "Green"), ("Green", "Blue"), ("Blue", "Yellow")]
         for cur, nxt in ccw_pairs:
             self.assertEqual(get_allowed_next_zone(cur, "B"), nxt)
             self.assertTrue(is_zone_transition_allowed(cur, nxt, "B"))
@@ -226,25 +226,25 @@ class TestPybricksAgent(unittest.TestCase):
             def stop(self):
                 self.stops += 1
 
-        # 1. Type A moves White -> Blue, rejects White -> Red (turns +90..+180)
+        # 1. Type A moves Yellow -> Blue, rejects Yellow -> Red (turns +90..+180)
         db_a = FakeDriveBase()
         nav_a = ZoneNavigator("A", drive_base_obj=db_a, has_color_sensor=True)
         nav_a.start(now_ms=0)
         self.assertEqual(db_a.drives[-1], (DRIVE_SPEED_MM_S, 0))
 
-        # Disallowed zone (Red from White for Type A) triggers backup & CW turn after DISALLOWED_CONFIRM_MS
+        # Disallowed zone (Red from Yellow for Type A) triggers backup & CW turn after DISALLOWED_CONFIRM_MS
         t = 20
-        nav_a.step(t, "White", "Red")
+        nav_a.step(t, "Yellow", "Red")
         self.assertEqual(nav_a.state, "DRIVE")
         t += DISALLOWED_CONFIRM_MS
-        res = nav_a.step(t, "White", "Red")
+        res = nav_a.step(t, "Yellow", "Red")
         self.assertIsNone(res)
         self.assertEqual(nav_a.state, "BACKUP")
         self.assertEqual(db_a.drives[-1], (-DRIVE_SPEED_MM_S, 0))
 
         # Complete backup -> enters TURN with +90..+180 deg
         t += BACKUP_DURATION_MS
-        nav_a.step(t, "White", "White")
+        nav_a.step(t, "Yellow", "Yellow")
         self.assertEqual(nav_a.state, "TURN")
         self.assertEqual(len(db_a.turns), 1)
         turn_angle, wait_flag = db_a.turns[-1]
@@ -254,27 +254,27 @@ class TestPybricksAgent(unittest.TestCase):
         # Complete turn -> resumes slow forward drive
         db_a.is_done = True
         t += 200
-        nav_a.step(t, "White", "White")
+        nav_a.step(t, "Yellow", "Yellow")
         self.assertEqual(nav_a.state, "DRIVE")
         self.assertEqual(db_a.drives[-1], (DRIVE_SPEED_MM_S, 0))
 
         # Crossing a seam (< EDGE_CONFIRM_MS) into allowed Blue commits without backing up
         for _ in range(6):
             t += 50
-            self.assertIsNone(nav_a.step(t, "White", None))
+            self.assertIsNone(nav_a.step(t, "Yellow", None))
             self.assertEqual(nav_a.state, "DRIVE")
         for i in range(ZONE_DEBOUNCE_SAMPLES):
             t += 20
-            res = nav_a.step(t, "White", "Blue")
+            res = nav_a.step(t, "Yellow", "Blue")
             if i < ZONE_DEBOUNCE_SAMPLES - 1:
                 self.assertIsNone(res)
             else:
                 self.assertEqual(res, "Blue")
         self.assertEqual(nav_a.state, "DRIVE")
 
-        # Brief seam misclassification (e.g. White for 150ms on Green->Red seam) must NOT stop Green->Red
-        nav_a.step(t + 20, "Green", "White")
-        nav_a.step(t + 120, "Green", "White")
+        # Brief seam misclassification (e.g. Yellow for 150ms on Green->Red seam) must NOT stop Green->Red
+        nav_a.step(t + 20, "Green", "Yellow")
+        nav_a.step(t + 120, "Green", "Yellow")
         self.assertEqual(nav_a.state, "DRIVE")
         for i in range(ZONE_DEBOUNCE_SAMPLES):
             res = nav_a.step(t + 140 + i * 20, "Green", "Red")
@@ -294,7 +294,7 @@ class TestPybricksAgent(unittest.TestCase):
         t += 20
         nav_b.step(t, "Red", "Red")
         t += 20
-        nav_b.step(t, "Red", "White")
+        nav_b.step(t, "Red", "Yellow")
         self.assertEqual(nav_b.state, "TURN")
         self.assertTrue(-180 <= db_b.turns[-1][0] <= -90)
 
@@ -303,7 +303,7 @@ class TestPybricksAgent(unittest.TestCase):
         nav_none = ZoneNavigator("A", drive_base_obj=db_none, has_color_sensor=False)
         nav_none.start(now_ms=0)
         for i in range(10):
-            nav_none.step(i * 20, "White", None)
+            nav_none.step(i * 20, "Yellow", None)
         self.assertEqual(nav_none.state, "DRIVE")
         self.assertEqual(len(db_none.turns), 0)
 
@@ -316,22 +316,66 @@ class TestPybricksAgent(unittest.TestCase):
         nav_obs.start(now_ms=0)
 
         # Obstacle detected closer than 100 mm -> backs up without turning
-        nav_obs.step(20, "White", "White", distance_mm=OBSTACLE_STOP_MM - 10)
+        nav_obs.step(20, "Yellow", "Yellow", distance_mm=OBSTACLE_STOP_MM - 10)
         self.assertEqual(nav_obs.state, "OBSTACLE_BACKUP")
         self.assertEqual(db_obs.drives[-1], (-DRIVE_SPEED_MM_S, 0))
         self.assertEqual(len(db_obs.turns), 0)
 
         # Still inside hysteresis band (< 120 mm) -> keeps backing up
-        nav_obs.step(40, "White", "White", distance_mm=OBSTACLE_RESUME_MM - 5)
+        nav_obs.step(40, "Yellow", "Yellow", distance_mm=OBSTACLE_RESUME_MM - 5)
         self.assertEqual(nav_obs.state, "OBSTACLE_BACKUP")
         self.assertEqual(db_obs.drives[-1], (-DRIVE_SPEED_MM_S, 0))
 
         # Obstacle cleared (>= 120 mm) for OBSTACLE_CLEAR_SAMPLES -> continues forward without turning
         for i in range(OBSTACLE_CLEAR_SAMPLES):
-            nav_obs.step(60 + i * 20, "White", "White", distance_mm=OBSTACLE_RESUME_MM)
+            nav_obs.step(60 + i * 20, "Yellow", "Yellow", distance_mm=OBSTACLE_RESUME_MM)
         self.assertEqual(nav_obs.state, "DRIVE")
         self.assertEqual(db_obs.drives[-1], (DRIVE_SPEED_MM_S, 0))
         self.assertEqual(len(db_obs.turns), 0)
+
+    def test_detect_zone_new_paper_hsv(self):
+        from agent_robot import detect_zone
+
+        class FakeHSV:
+            def __init__(self, h, s, v):
+                self.h, self.s, self.v = h, s, v
+
+        class FakeSensor:
+            def __init__(self, h, s, v):
+                self._hsv = FakeHSV(h, s, v)
+
+            def hsv(self):
+                return self._hsv
+
+        # Green readings from log
+        for hsv in [(123, 57, 30), (120, 55, 30), (123, 55, 31)]:
+            self.assertEqual(detect_zone(FakeSensor(*hsv)), "Green")
+
+        # Blue readings from log
+        for hsv in [(200, 89, 35), (199, 89, 30), (200, 89, 33)]:
+            self.assertEqual(detect_zone(FakeSensor(*hsv)), "Blue")
+
+        # Yellow readings from log
+        for hsv in [(33, 79, 80), (32, 79, 58), (32, 79, 57)]:
+            self.assertEqual(detect_zone(FakeSensor(*hsv)), "Yellow")
+
+        # Red readings from log
+        for hsv in [(356, 92, 35), (354, 92, 35), (356, 91, 35)]:
+            self.assertEqual(detect_zone(FakeSensor(*hsv)), "Red")
+
+        # Dark background / edge / transition readings from log -> None
+        for hsv in [
+            (40, 11, 15),
+            (10, 5, 15),
+            (60, 5, 15),
+            (10, 0, 0),
+            (120, 55, 1),
+            (240, 100, 0),
+            (180, 100, 0),
+            (0, 92, 7),
+            (354, 92, 10),
+        ]:
+            self.assertIsNone(detect_zone(FakeSensor(*hsv)))
 
 
 if __name__ == "__main__":

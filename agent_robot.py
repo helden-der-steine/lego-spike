@@ -36,17 +36,17 @@ RIGHT_MOTOR_PORT = Port.D
 COLOR_SENSOR_PORT = Port.B
 DISTANCE_SENSOR_PORT = Port.A
 
-# HSV ranges for the 4 zones: (h_min, h_max, s_min, s_max, v_min, v_max)
+# HSV ranges for the 4 zones: Yellow, Blue, Green, Red
 # Note: Red wraps around 0/360, handled in detect_zone()
 ZONE_NAMES = {
     "Red": "Red",
     "Green": "Green",
     "Blue": "Blue",
-    "White": "White",
+    "Yellow": "Yellow",
 }
 
-# Clockwise zone sequence: White -> Blue -> Green -> Red -> White
-ZONE_ORDER_CW = ("White", "Blue", "Green", "Red")
+# Clockwise zone sequence: Yellow -> Blue -> Green -> Red -> Yellow
+ZONE_ORDER_CW = ("Yellow", "Blue", "Green", "Red")
 
 # Slow driving & edge-avoidance parameters
 DRIVE_SPEED_MM_S = 35       # Very slow forward/backup speed (mm/s)
@@ -229,7 +229,7 @@ def read_distance_mm(sensor):
 def detect_zone(sensor):
     """
     Classifies the current zone from the ColorSensor's HSV reading.
-    Returns one of ZONE_NAMES values ('Red', 'Green', 'Blue', 'White'),
+    Returns one of ZONE_NAMES values ('Red', 'Green', 'Blue', 'Yellow'),
     or None if over a border/transition/unknown surface.
     """
     if sensor is None:
@@ -241,24 +241,24 @@ def detect_zone(sensor):
 
     h, s, v = hsv.h, hsv.s, hsv.v
 
-    # Ignore dark borders, black lines, and lift/transition artifacts
-    if v < 25:
+    # Ignore dark borders, black lines, and lift/transition artifacts (observed V=0..15)
+    if v < 22:
         return None
 
-    # White: low saturation, high value (HSV observed: S=7..13, V=53..78)
-    if s <= 16 and v >= 35:
-        return ZONE_NAMES["White"]
-
-    # Red: hue near 0/360, high saturation (HSV observed: H=10..14, S=87..89, V=40..51)
-    if (h <= 30 or h >= 330) and s >= 60:
+    # Red: hue near 0/360, high saturation (HSV observed: H=354..356, S=91..92, V=35)
+    if (h <= 15 or h >= 330) and s >= 65:
         return ZONE_NAMES["Red"]
 
-    # Light Green: mid-green hue, moderate saturation (HSV observed: H=140..148, S=32..36, V=39..55)
-    if 110 <= h <= 170 and 20 <= s <= 65:
+    # Yellow: warm yellow hue, high saturation & value (HSV observed: H=32..33, S=79, V=57..80)
+    if 20 <= h <= 55 and s >= 55 and v >= 35:
+        return ZONE_NAMES["Yellow"]
+
+    # Green: mid-green hue, moderate-to-high saturation (HSV observed: H=120..123, S=55..57, V=30..31)
+    if 95 <= h <= 165 and s >= 35:
         return ZONE_NAMES["Green"]
 
-    # Blue: cyan-blue hue, high saturation (HSV observed: H=194..197, S=84..87, V=33..41)
-    if 175 <= h <= 225 and s >= 60:
+    # Blue: cyan-blue hue, high saturation (HSV observed: H=199..200, S=89, V=30..35)
+    if 175 <= h <= 235 and s >= 60:
         return ZONE_NAMES["Blue"]
 
     return None
@@ -422,8 +422,8 @@ def wait_for_start():
 def get_allowed_next_zone(current, agent_type):
     """
     Returns the single allowed next zone from `current`:
-    - Type A moves clockwise: White -> Blue -> Green -> Red -> White
-    - Type B moves counter-clockwise: White -> Red -> Green -> Blue -> White
+    - Type A moves clockwise: Yellow -> Blue -> Green -> Red -> Yellow
+    - Type B moves counter-clockwise: Yellow -> Red -> Green -> Blue -> Yellow
     Returns None if `current` is not yet one of the 4 zones (e.g. '0').
     """
     if current not in ZONE_ORDER_CW:
