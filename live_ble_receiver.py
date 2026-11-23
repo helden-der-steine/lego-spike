@@ -38,6 +38,29 @@ CMD_STOP = 2
 INACTIVITY_TIMEOUT_SECONDS = 10.0
 OUTPUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
 
+# Stats for Robots 1..10 (mirrors agent_robot.py; index 0 is unused)
+DEFAULT_ROBOT_STATS = {"agent_type": "A", "initial_infected": False, "vaccinated": "No"}
+ROBOT_STATS = [
+    None,  # Index 0 unused (Robot IDs are 1..10)
+    {"agent_type": "A", "initial_infected": False, "vaccinated": "No"},  # Robot 1
+    {"agent_type": "A", "initial_infected": True,  "vaccinated": "No"},  # Robot 2
+    {"agent_type": "A", "initial_infected": False, "vaccinated": "No"},  # Robot 3
+    {"agent_type": "A", "initial_infected": False, "vaccinated": "No"},  # Robot 4
+    {"agent_type": "B", "initial_infected": False, "vaccinated": "No"},  # Robot 5
+    {"agent_type": "B", "initial_infected": False, "vaccinated": "No"},  # Robot 6
+    {"agent_type": "B", "initial_infected": False, "vaccinated": "No"},  # Robot 7
+    {"agent_type": "B", "initial_infected": False, "vaccinated": "No"},  # Robot 8
+    {"agent_type": "B", "initial_infected": False, "vaccinated": "No"},  # Robot 9
+    {"agent_type": "B", "initial_infected": False, "vaccinated": "No"},  # Robot 10
+]
+
+
+def get_robot_stats(robot_id: int) -> dict:
+    """Returns the stats dict for `robot_id` (1..10) from ROBOT_STATS, or defaults."""
+    if 1 <= robot_id < len(ROBOT_STATS) and ROBOT_STATS[robot_id] is not None:
+        return ROBOT_STATS[robot_id]
+    return DEFAULT_ROBOT_STATS
+
 
 # ==============================================================================
 # Pybricks BLE Broadcast Payload Encoder & Decoder (Channel + Typed Values)
@@ -319,6 +342,7 @@ class CentralHub:
                 else ("Infection" if event_code == "I" else ("Start" if event_code == "A" else "Sample"))
             )
 
+            stats = get_robot_stats(robot_id)
             self.record_entry(
                 {
                     "Time_Stamp": elapsed_s,
@@ -327,8 +351,8 @@ class CentralHub:
                     "Zone": zone,
                     "SIR_State": sir_state,
                     "Contact_ID": "—",
-                    "Agent_Type": "B" if robot_id >= 5 else "A",
-                    "Vaccinated": "No",
+                    "Agent_Type": stats["agent_type"],
+                    "Vaccinated": stats["vaccinated"],
                 },
                 seq_num=seq_num,
             )

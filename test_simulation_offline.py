@@ -122,7 +122,20 @@ class TestPybricksAgent(unittest.TestCase):
             self.assertEqual(by_id[10]["Agent_Type"], "B")
 
     def test_config_from_hub_name(self):
-        from agent_robot import config_from_hub_name, parse_robot_id
+        from agent_robot import (
+            ROBOT_STATS,
+            config_from_hub_name,
+            get_robot_stats,
+            parse_robot_id,
+        )
+
+        self.assertEqual(len(ROBOT_STATS), 11)
+        self.assertIsNone(ROBOT_STATS[0])
+        for rid in range(1, 11):
+            self.assertIn(ROBOT_STATS[rid]["agent_type"], ("A", "B"))
+            self.assertIsInstance(ROBOT_STATS[rid]["initial_infected"], bool)
+            self.assertIn(ROBOT_STATS[rid]["vaccinated"], ("Yes", "No"))
+            self.assertEqual(get_robot_stats(rid), live_ble_receiver.get_robot_stats(rid))
 
         self.assertEqual(parse_robot_id("Held 1"), 1)
         self.assertEqual(parse_robot_id("Held 10"), 10)

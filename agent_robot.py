@@ -9,10 +9,26 @@ import json
 import gc
 
 # ==============================================================================
-# 1. SETTINGS (Automatically derived from Hub Name: "Held 1", "Held 2", ...)
+# 1. SETTINGS (Robot 1..10 stats table; matched by Hub Name: "Held 1".."Held 10")
 # ==============================================================================
-VACCINATED = "No"           # "Yes" or "No"
 ENABLE_MOVEMENT = True      # Set True to enable driving
+
+DEFAULT_ROBOT_STATS = {"agent_type": "A", "initial_infected": False, "vaccinated": "No"}
+
+# Stats for Robots 1..10 (index 0 is unused so ROBOT_STATS[robot_id] maps 1-to-1)
+ROBOT_STATS = [
+    None,  # Index 0 unused (Robot IDs are 1..10)
+    {"agent_type": "A", "initial_infected": False, "vaccinated": "No"},  # Robot 1
+    {"agent_type": "A", "initial_infected": True,  "vaccinated": "No"},  # Robot 2
+    {"agent_type": "A", "initial_infected": False, "vaccinated": "No"},  # Robot 3
+    {"agent_type": "A", "initial_infected": False, "vaccinated": "No"},  # Robot 4
+    {"agent_type": "B", "initial_infected": False, "vaccinated": "No"},  # Robot 5
+    {"agent_type": "B", "initial_infected": False, "vaccinated": "No"},  # Robot 6
+    {"agent_type": "B", "initial_infected": False, "vaccinated": "No"},  # Robot 7
+    {"agent_type": "B", "initial_infected": False, "vaccinated": "No"},  # Robot 8
+    {"agent_type": "B", "initial_infected": False, "vaccinated": "No"},  # Robot 9
+    {"agent_type": "B", "initial_infected": False, "vaccinated": "No"},  # Robot 10
+]
 
 # Default motor and sensor ports
 LEFT_MOTOR_PORT = Port.C
@@ -91,21 +107,27 @@ def parse_robot_id(hub_name, default=1):
     return int(digits) if digits else default
 
 
+def get_robot_stats(robot_id):
+    """Returns the stats dict for `robot_id` (1..10) from ROBOT_STATS, or defaults."""
+    if 1 <= robot_id < len(ROBOT_STATS) and ROBOT_STATS[robot_id] is not None:
+        return ROBOT_STATS[robot_id]
+    return DEFAULT_ROBOT_STATS
+
+
 def config_from_hub_name(hub_name, default_id=1):
     """
-    Derives (ROBOT_ID, AGENT_TYPE, INITIAL_INFECTED) from the hub name:
-    - Held 1..4  -> Movement A (turns right), Held 5+ -> Movement B (turns left)
-    - Held 1     -> Infected at start (True), others -> Susceptible (False)
+    Looks up (ROBOT_ID, AGENT_TYPE, INITIAL_INFECTED) in ROBOT_STATS
+    using the robot number parsed from `hub_name` (e.g. 'Held 1'..'Held 10').
     """
     robot_id = parse_robot_id(hub_name, default=default_id)
-    agent_type = "B" if robot_id >= 5 else "A"
-    initial_infected = (robot_id == 2)
-    return robot_id, agent_type, initial_infected
+    stats = get_robot_stats(robot_id)
+    return robot_id, stats["agent_type"], stats["initial_infected"]
 
 
 _probe_hub = PrimeHub(observe_channels=list(range(0, MAX_ROBOTS + 1)))
 HUB_NAME = get_hub_name(_probe_hub)
 ROBOT_ID, AGENT_TYPE, INITIAL_INFECTED = config_from_hub_name(HUB_NAME)
+VACCINATED = get_robot_stats(ROBOT_ID)["vaccinated"]
 BROADCAST_CHANNEL = ROBOT_ID
 del _probe_hub
 gc.collect()
