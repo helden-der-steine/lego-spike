@@ -307,31 +307,40 @@ class TestPybricksAgent(unittest.TestCase):
         self.assertEqual(nav_none.state, "DRIVE")
         self.assertEqual(len(db_none.turns), 0)
 
-        # 4. Distance sensor obstacle backup & forward resume without turning (10 cm threshold)
+        # 4. Distance sensor obstacle stop, backup, and turn away (150 mm / 190 mm thresholds)
         from agent_robot import OBSTACLE_CLEAR_SAMPLES, OBSTACLE_RESUME_MM, OBSTACLE_STOP_MM
 
-        self.assertEqual(OBSTACLE_STOP_MM, 100)
+        self.assertEqual(OBSTACLE_STOP_MM, 150)
+        self.assertEqual(OBSTACLE_RESUME_MM, 190)
         db_obs = FakeDriveBase()
         nav_obs = ZoneNavigator("A", drive_base_obj=db_obs, has_color_sensor=True)
         nav_obs.start(now_ms=0)
 
-        # Obstacle detected closer than 100 mm -> backs up without turning
+        # Obstacle detected closer than 150 mm -> stops immediately and backs up
+        stops_before = db_obs.stops
         nav_obs.step(20, "White", "White", distance_mm=OBSTACLE_STOP_MM - 10)
         self.assertEqual(nav_obs.state, "OBSTACLE_BACKUP")
+        self.assertEqual(db_obs.stops, stops_before + 1)
         self.assertEqual(db_obs.drives[-1], (-DRIVE_SPEED_MM_S, 0))
         self.assertEqual(len(db_obs.turns), 0)
 
-        # Still inside hysteresis band (< 120 mm) -> keeps backing up
+        # Still inside hysteresis band (< 190 mm) -> keeps backing up
         nav_obs.step(40, "White", "White", distance_mm=OBSTACLE_RESUME_MM - 5)
         self.assertEqual(nav_obs.state, "OBSTACLE_BACKUP")
         self.assertEqual(db_obs.drives[-1], (-DRIVE_SPEED_MM_S, 0))
 
-        # Obstacle cleared (>= 120 mm) for OBSTACLE_CLEAR_SAMPLES -> continues forward without turning
+        # Obstacle cleared (>= 190 mm) for OBSTACLE_CLEAR_SAMPLES -> transitions to TURN away
         for i in range(OBSTACLE_CLEAR_SAMPLES):
             nav_obs.step(60 + i * 20, "White", "White", distance_mm=OBSTACLE_RESUME_MM)
+        self.assertEqual(nav_obs.state, "TURN")
+        self.assertEqual(len(db_obs.turns), 1)
+        self.assertTrue(90 <= db_obs.turns[-1][0] <= 180)
+
+        # Complete turn -> resumes forward drive
+        db_obs.is_done = True
+        nav_obs.step(300, "White", "White", distance_mm=OBSTACLE_RESUME_MM)
         self.assertEqual(nav_obs.state, "DRIVE")
         self.assertEqual(db_obs.drives[-1], (DRIVE_SPEED_MM_S, 0))
-        self.assertEqual(len(db_obs.turns), 0)
 
     def test_logging_interval_and_infection_timing(self):
         import agent_robot as ar
@@ -417,12 +426,86 @@ class TestPybricksAgent(unittest.TestCase):
                 chub.handle_broadcast_packet(1, [1, 0.0, "S", "White", 1])
                 chub.handle_broadcast_packet(2, [2, 0.0, "I", "Red", 1])
                 self.assertFalse(chub.is_simulation_finished(now=100.0, confirm_s=5.0))
-                chub.handle_broadcast_packet(2, [2, 5.0, "R", "Red", 2])
+                chub.handle_broadcast_packet(2, [2, 5.0, "R", "Red", 2, "R"])
+                self.assertEqual(chub.current_run_entries[-1]["Event"], "Recovery")
                 self.assertFalse(chub.is_simulation_finished(now=105.0, confirm_s=5.0))
                 self.assertFalse(chub.is_simulation_finished(now=109.9, confirm_s=5.0))
                 self.assertTrue(chub.is_simulation_finished(now=110.0, confirm_s=5.0))
         finally:
             ar.hub.ble.observe = orig_observe
+
+    def test_recovery_after_120_seconds(self):
+        import agent_robot as ar
+
+        self.assertEqual(ar.RECOVERY_DURATION_MS, 120000)
+
+        orig_observe = ar.hub.ble.observe
+        orig_random = ar.random.random
+        orig_time = ar.stopwatch.time
+        orig_broadcast = ar.hub.ble.broadcast
+        broadcasts = []
+        try:
+            ar.hub.ble.broadcast = lambda payload: broadcasts.append(payload)
+            ar.log_entries.clear()
+
+            # 1. Susceptible robot does not recover
+            ar.sir_state = ar.STATE_SUSCEPTIBLE
+            ar.infected_since_ms = None
+            self.assertFalse(ar.check_recovery(200000))
+            self.assertEqual(ar.sir_state, ar.STATE_SUSCEPTIBLE)
+
+            # 2. Initially infected robot recovers at exactly 120000 ms
+            ar.sir_state = ar.STATE_INFECTED
+            ar.infected_since_ms = 0
+            ar.current_zone = "Red"
+            ar.stopwatch.time = lambda: 120000
+            self.assertFalse(ar.check_recovery(119999))
+            self.assertEqual(ar.sir_state, ar.STATE_INFECTED)
+            self.assertTrue(ar.check_recovery(120000))
+            self.assertEqual(ar.sir_state, ar.STATE_RECOVERED)
+            self.assertIsNone(ar.infected_since_ms)
+            self.assertEqual(ar.log_entries[-1]["Event"], "Recovery")
+            self.assertEqual(ar.log_entries[-1]["SIR_State"], ar.STATE_RECOVERED)
+            self.assertEqual(broadcasts[-1][2], ar.STATE_RECOVERED)
+            self.assertEqual(broadcasts[-1][5], "R")
+
+            # Subsequent calls while recovered do nothing
+            self.assertFalse(ar.check_recovery(250000))
+            self.assertEqual(ar.sir_state, ar.STATE_RECOVERED)
+
+            # 3. Robot infected during the run recovers 120s after infection time
+            ar._clear_peer_contact()
+            ar.peer_last_seen.clear()
+            ar.peer_states.clear()
+            ar.peer_zones.clear()
+            ar.sir_state = ar.STATE_SUSCEPTIBLE
+            ar.infected_since_ms = None
+            ar.current_zone = "Blue"
+            ar.hub.ble.observe = lambda ch: (2, 1.0, ar.STATE_INFECTED, "Blue", 1) if ch == 2 else None
+            ar.random.random = lambda: 0.0
+            ar.stopwatch.time = lambda: 31000
+
+            ar.check_zone_infection(1000)
+            ar.check_zone_infection(31000)
+            self.assertEqual(ar.sir_state, ar.STATE_INFECTED)
+            self.assertEqual(ar.infected_since_ms, 31000)
+
+            self.assertFalse(ar.check_recovery(31000 + ar.RECOVERY_DURATION_MS - 1))
+            self.assertEqual(ar.sir_state, ar.STATE_INFECTED)
+
+            ar.stopwatch.time = lambda: 31000 + ar.RECOVERY_DURATION_MS
+            self.assertTrue(ar.check_recovery(31000 + ar.RECOVERY_DURATION_MS))
+            self.assertEqual(ar.sir_state, ar.STATE_RECOVERED)
+
+            # 4. Recovered robot cannot be re-infected
+            ar.check_zone_infection(200000)
+            ar.check_zone_infection(240000)
+            self.assertEqual(ar.sir_state, ar.STATE_RECOVERED)
+        finally:
+            ar.hub.ble.observe = orig_observe
+            ar.random.random = orig_random
+            ar.stopwatch.time = orig_time
+            ar.hub.ble.broadcast = orig_broadcast
 
 
 if __name__ == "__main__":

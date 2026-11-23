@@ -57,8 +57,8 @@ EDGE_TURN_MIN_DEG = 90
 EDGE_TURN_MAX_DEG = 180
 ZONE_DEBOUNCE_SAMPLES = 3
 DISALLOWED_CONFIRM_MS = 350
-OBSTACLE_STOP_MM = 80      # Back up when an obstacle is closer than 100 mm (10 cm)
-OBSTACLE_RESUME_MM = 100    # Resume driving forward once obstacle clears beyond 120 mm (12 cm)
+OBSTACLE_STOP_MM = 150      # Stop, back up, and turn when an obstacle is closer than 150 mm (15 cm)
+OBSTACLE_RESUME_MM = 190    # Finish backing up and turn once obstacle clears beyond 190 mm (19 cm)
 OBSTACLE_CLEAR_SAMPLES = 3
 
 # DriveBase wheel dimensions (Standard SPIKE Prime wheels: 56 mm, track: 112 mm)
@@ -84,6 +84,7 @@ STATE_VACCINATED = "V"  # Defined for state support; no vaccination behavior yet
 INFECTION_CONTACT_MS = 30000        # Co-location duration in ms (30s) before infection can occur
 INFECTION_CHECK_INTERVAL_MS = 1000  # Roll for infection once every 1s after threshold
 INFECTION_PROB_PER_SEC = 0.05       # Probability of infection per second after 30s contact
+RECOVERY_DURATION_MS = 120000       # Duration in ms (120s) before an infected robot recovers ('I' -> 'R')
 
 LOG_INTERVAL_MS = 5000              # Periodic snapshot log interval in ms (5.0 s)
 PEER_CONTACT_TIMEOUT_MS = 2500      # Drop zone-contact timer if peer silent > 2.5s
@@ -190,6 +191,7 @@ OBSERVE_CHANNELS = [CONTROL_CHANNEL] + PEER_CHANNELS
 hub = PrimeHub(broadcast_channel=BROADCAST_CHANNEL, observe_channels=OBSERVE_CHANNELS)
 
 sir_state = STATE_INFECTED if INITIAL_INFECTED else STATE_SUSCEPTIBLE
+infected_since_ms = 0 if INITIAL_INFECTED else None
 current_zone = "0"
 log_entries = []
 seq_num = 0
@@ -333,7 +335,9 @@ def log_sample(event_name="Sample", contact_id="—"):
     # Broadcast over BLE on Channel ROBOT_ID: (ROBOT_ID, elapsed_s, sir_state, current_zone, seq_num, event_code)
     event_code = (
         "Z" if event_name == "change_zone"
-        else ("I" if event_name == "Infection" else ("A" if event_name == "Start" else "S"))
+        else ("I" if event_name == "Infection"
+        else ("R" if event_name == "Recovery"
+        else ("A" if event_name == "Start" else "S")))
     )
     try:
         hub.ble.broadcast((ROBOT_ID, elapsed_s, sir_state, current_zone, seq_num, event_code))
@@ -415,7 +419,7 @@ def check_zone_infection(now_ms):
     INFECTION_CONTACT_MS (30s), it becomes infected (STATE_INFECTED) with probability
     INFECTION_PROB_PER_SEC (0.05) each second.
     """
-    global sir_state, ever_saw_infected
+    global sir_state, ever_saw_infected, infected_since_ms
     observe_peers(now_ms)
 
     if sir_state != STATE_SUSCEPTIBLE or current_zone == "0":
@@ -444,6 +448,7 @@ def check_zone_infection(now_ms):
 
                 if should_roll and random.random() < INFECTION_PROB_PER_SEC:
                     sir_state = STATE_INFECTED
+                    infected_since_ms = now_ms
                     ever_saw_infected = True
                     show_state(sir_state)
                     hub.speaker.beep(frequency=600, duration=150)
@@ -452,6 +457,27 @@ def check_zone_infection(now_ms):
                     return
         else:
             _clear_peer_contact(other_id)
+
+
+def check_recovery(now_ms):
+    """
+    Transitions an infected robot (STATE_INFECTED) to recovered (STATE_RECOVERED)
+    once it has been infected for at least RECOVERY_DURATION_MS (120000 ms = 120 s).
+    """
+    global sir_state, infected_since_ms
+    if sir_state != STATE_INFECTED:
+        return False
+    if infected_since_ms is None:
+        infected_since_ms = now_ms
+        return False
+    if now_ms - infected_since_ms >= RECOVERY_DURATION_MS:
+        sir_state = STATE_RECOVERED
+        infected_since_ms = None
+        show_state(sir_state)
+        hub.speaker.beep(frequency=800, duration=150)
+        log_sample("Recovery")
+        return True
+    return False
 
 _observe_error_logged = False
 
@@ -510,7 +536,9 @@ def wait_for_start():
         wait(20)
 
     # Synchronize t = 0.0s
+    global infected_since_ms
     stopwatch.reset()
+    infected_since_ms = 0 if sir_state == STATE_INFECTED else None
     show_state(sir_state)
     hub.speaker.beep(frequency=1000, duration=200)
 
@@ -625,14 +653,14 @@ class ZoneNavigator:
             if detected == current_zone_val:
                 self.seen_cur_obstacle_backup = True
             elif self.seen_cur_obstacle_backup and detected is not None:
-                self._resume_drive(now_ms)
+                self._start_turn(now_ms)
                 return None
 
             if distance_mm is None or distance_mm >= OBSTACLE_RESUME_MM:
                 self.obstacle_clear_count += 1
                 if self.obstacle_clear_count >= OBSTACLE_CLEAR_SAMPLES:
                     self.obstacle_clear_count = 0
-                    self._resume_drive(now_ms)
+                    self._start_turn(now_ms)
             else:
                 self.obstacle_clear_count = 0
             return None
@@ -645,6 +673,7 @@ class ZoneNavigator:
                 self.seen_cur_obstacle_backup = (detected == current_zone_val)
                 self.obstacle_clear_count = 0
                 if self.drive_base:
+                    self.drive_base.stop()
                     self.drive_base.drive(speed=-DRIVE_SPEED_MM_S, turn_rate=0)
                 return None
         if movement_enabled and self.state == "BACKUP":
@@ -712,7 +741,7 @@ class ZoneNavigator:
 # 6. MAIN PROGRAM
 # ==============================================================================
 def main():
-    global current_zone, ever_saw_infected, no_infected_since
+    global current_zone, ever_saw_infected, no_infected_since, infected_since_ms
     wait_for_start()
 
     _clear_peer_contact()
@@ -720,6 +749,7 @@ def main():
     peer_states.clear()
     peer_zones.clear()
     ever_saw_infected = (sir_state == STATE_INFECTED)
+    infected_since_ms = 0 if sir_state == STATE_INFECTED else None
     no_infected_since = None
 
     initial_zone = detect_zone(color_sensor)
@@ -766,12 +796,15 @@ def main():
         # 1. Check for co-location infection (30s in same zone as an 'I' robot, then 0.05/s)
         check_zone_infection(now_ms)
 
-        # 2. End simulation if no robot remains infected
+        # 2. Check for recovery (120s after becoming infected)
+        check_recovery(now_ms)
+
+        # 3. End simulation if no robot remains infected
         if is_simulation_finished(now_ms):
             print(f"[ROBOT {ROBOT_ID}] No infected robots remaining! Ending simulation...")
             break
 
-        # 3. Periodic snapshot log every 5000 ms (5.0 s)
+        # 4. Periodic snapshot log every 5000 ms (5.0 s)
         if now_ms - last_log_ms >= LOG_INTERVAL_MS:
             log_sample("Sample")
             last_log_ms = now_ms
