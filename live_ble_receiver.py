@@ -35,7 +35,8 @@ ROBOT_OBSERVE_CHANNELS = set(range(1, 11))  # Laptop listens to Channels 1..10
 CMD_START = 1
 CMD_STOP = 2
 
-INACTIVITY_TIMEOUT_SECONDS = 10.0
+INACTIVITY_TIMEOUT_SECONDS = 15.0
+NO_INFECTED_END_SECONDS = 5.0
 OUTPUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
 
 # Stats for Robots 1..10 (mirrors agent_robot.py; index 0 is unused)
@@ -280,10 +281,40 @@ class CentralHub:
         self.standby_robots = {}     # robot_id -> (channel, sir_state, last_seen)
         self.current_run_entries = []
         self.seen_signatures = set() # (robot_id, seq_num)
+        self.robot_states = {}       # robot_id -> latest SIR_State in current run
+        self.ever_saw_infected = False
+        self.no_infected_since = None
         self.last_packet_time = None
         self.run_started = False
         self.run_number = 1
         self._running = True
+
+    def _reset_run_state(self):
+        self.current_run_entries = []
+        self.seen_signatures.clear()
+        self.standby_robots.clear()
+        self.robot_states.clear()
+        self.ever_saw_infected = False
+        self.no_infected_since = None
+        self.last_packet_time = None
+        self.run_started = False
+
+    def is_simulation_finished(self, now=None, confirm_s=NO_INFECTED_END_SECONDS) -> bool:
+        """
+        Returns True once at least one robot was infected in the current run
+        and no tracked robot remains infected for `confirm_s` seconds.
+        """
+        if not self.run_started or not self.ever_saw_infected:
+            self.no_infected_since = None
+            return False
+        if any(state == "I" for state in self.robot_states.values()):
+            self.no_infected_since = None
+            return False
+        now = time.time() if now is None else now
+        if self.no_infected_since is None:
+            self.no_infected_since = now
+            return False
+        return (now - self.no_infected_since) >= confirm_s
 
     def record_entry(self, entry, seq_num=None):
         """Deduplicates and stores a telemetry event from Channels 1..10."""
@@ -297,6 +328,10 @@ class CentralHub:
 
         self.seen_signatures.add(sig)
         self.current_run_entries.append(entry)
+        self.robot_states[entry["ID"]] = entry["SIR_State"]
+        if entry["SIR_State"] == "I":
+            self.ever_saw_infected = True
+            self.no_infected_since = None
         self.last_packet_time = time.time()
         self.run_started = True
 
@@ -363,6 +398,9 @@ class CentralHub:
         print(f"🚀 BROADCASTING 'START' ON BLE CHANNEL {LAPTOP_BROADCAST_CHANNEL} TO ALL ROBOTS...")
         print("=" * 60)
 
+        self.robot_states.clear()
+        self.ever_saw_infected = False
+        self.no_infected_since = None
         self.run_started = True
         self.last_packet_time = time.time()
 
@@ -384,8 +422,7 @@ class CentralHub:
         if self.current_run_entries:
             self.save_run()
         else:
-            self.run_started = False
-            self.last_packet_time = None
+            self._reset_run_state()
 
     def save_run(self):
         """Saves current run entries into a timestamped JSON file."""
@@ -418,11 +455,7 @@ class CentralHub:
         print("=" * 60 + "\n")
 
         self.run_number += 1
-        self.current_run_entries = []
-        self.seen_signatures.clear()
-        self.standby_robots.clear()
-        self.last_packet_time = None
-        self.run_started = False
+        self._reset_run_state()
         print("🎯 Ready for the next run. Press 's' + ENTER to broadcast START!\n")
         return filepath
 
@@ -445,7 +478,7 @@ def print_help():
   [save]       : Force save current run to JSON immediately
   [help]       : Show this menu
   [exit]       : Quit program
-  Auto-Save    : Automatically saves run after 10s without logs
+  Auto-Save    : Automatically saves run after 15s without logs (or when 0 infected)
 ================================================================
 """
     )
@@ -517,7 +550,13 @@ async def run_central_hub():
         while hub._running:
             await asyncio.sleep(0.5)
 
-            # Auto-save after 10s of inactivity once telemetry has been received
+            # End run automatically once no robot remains infected
+            if hub.is_simulation_finished():
+                print("\n[END] No infected robots remaining. Stopping all robots and saving run...")
+                await hub.stop_all()
+                continue
+
+            # Auto-save after inactivity once telemetry has been received
             if (
                 hub.run_started
                 and hub.current_run_entries
