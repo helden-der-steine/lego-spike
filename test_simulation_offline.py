@@ -122,17 +122,216 @@ class TestPybricksAgent(unittest.TestCase):
             self.assertEqual(by_id[10]["Agent_Type"], "B")
 
     def test_config_from_hub_name(self):
-        from agent_robot import config_from_hub_name, parse_robot_id
+        from agent_robot import (
+            ROBOT_STATS,
+            config_from_hub_name,
+            get_robot_stats,
+            parse_robot_id,
+        )
+
+        self.assertEqual(len(ROBOT_STATS), 11)
+        self.assertIsNone(ROBOT_STATS[0])
+        for rid in range(1, 11):
+            self.assertIn(ROBOT_STATS[rid]["agent_type"], ("A", "B"))
+            self.assertIsInstance(ROBOT_STATS[rid]["initial_infected"], bool)
+            self.assertIn(ROBOT_STATS[rid]["vaccinated"], ("Yes", "No"))
+            self.assertEqual(get_robot_stats(rid), live_ble_receiver.get_robot_stats(rid))
 
         self.assertEqual(parse_robot_id("Held 1"), 1)
         self.assertEqual(parse_robot_id("Held 10"), 10)
         self.assertEqual(parse_robot_id("", default=1), 1)
 
-        self.assertEqual(config_from_hub_name("Held 1"), (1, "A", True))
-        self.assertEqual(config_from_hub_name("Held 2"), (2, "A", False))
+        self.assertEqual(config_from_hub_name("Held 1"), (1, "A", False))
+        self.assertEqual(config_from_hub_name("Held 2"), (2, "A", True))
         self.assertEqual(config_from_hub_name("Held 4"), (4, "A", False))
         self.assertEqual(config_from_hub_name("Held 5"), (5, "B", False))
         self.assertEqual(config_from_hub_name("Held 10"), (10, "B", False))
+
+    def test_zone_order_and_allowed_transitions(self):
+        from agent_robot import (
+            ENABLE_MOVEMENT,
+            DRIVE_SPEED_MM_S,
+            ZONE_ORDER_CW,
+            get_allowed_next_zone,
+            is_zone_transition_allowed,
+            pick_edge_turn_angle,
+        )
+
+        self.assertTrue(ENABLE_MOVEMENT)
+        self.assertLessEqual(DRIVE_SPEED_MM_S, 50)
+        self.assertEqual(ZONE_ORDER_CW, ("White", "Blue", "Green", "Red"))
+
+        # Type A: strictly clockwise
+        cw_pairs = [("White", "Blue"), ("Blue", "Green"), ("Green", "Red"), ("Red", "White")]
+        for cur, nxt in cw_pairs:
+            self.assertEqual(get_allowed_next_zone(cur, "A"), nxt)
+            self.assertTrue(is_zone_transition_allowed(cur, nxt, "A"))
+            for other in ZONE_ORDER_CW:
+                if other != nxt:
+                    self.assertFalse(is_zone_transition_allowed(cur, other, "A"))
+
+        # Type B: strictly counter-clockwise
+        ccw_pairs = [("White", "Red"), ("Red", "Green"), ("Green", "Blue"), ("Blue", "White")]
+        for cur, nxt in ccw_pairs:
+            self.assertEqual(get_allowed_next_zone(cur, "B"), nxt)
+            self.assertTrue(is_zone_transition_allowed(cur, nxt, "B"))
+            for other in ZONE_ORDER_CW:
+                if other != nxt:
+                    self.assertFalse(is_zone_transition_allowed(cur, other, "B"))
+
+        # Initial unknown zone '0' allows entering any valid zone
+        for z in ZONE_ORDER_CW:
+            self.assertTrue(is_zone_transition_allowed("0", z, "A"))
+            self.assertTrue(is_zone_transition_allowed("0", z, "B"))
+
+        # Edge turn angles: 90..180 deg, clockwise (+) for A, counter-clockwise (-) for B
+        for _ in range(50):
+            ang_a = pick_edge_turn_angle("A")
+            self.assertGreaterEqual(ang_a, 90)
+            self.assertLessEqual(ang_a, 180)
+            ang_b = pick_edge_turn_angle("B")
+            self.assertLessEqual(ang_b, -90)
+            self.assertGreaterEqual(ang_b, -180)
+
+    def test_zone_navigator_transitions_and_edge_bounces(self):
+        from agent_robot import (
+            BACKUP_DURATION_MS,
+            DISALLOWED_CONFIRM_MS,
+            DRIVE_SPEED_MM_S,
+            EDGE_CONFIRM_MS,
+            ZONE_DEBOUNCE_SAMPLES,
+            ZoneNavigator,
+        )
+
+        class FakeDriveBase:
+            def __init__(self):
+                self.drives = []
+                self.turns = []
+                self.stops = 0
+                self.is_done = False
+
+            def settings(self, *args, **kwargs):
+                pass
+
+            def drive(self, speed, turn_rate):
+                self.drives.append((speed, turn_rate))
+
+            def turn(self, angle, wait=True):
+                self.turns.append((angle, wait))
+                self.is_done = False
+
+            def done(self):
+                return self.is_done
+
+            def stop(self):
+                self.stops += 1
+
+        # 1. Type A moves White -> Blue, rejects White -> Red (turns +90..+180)
+        db_a = FakeDriveBase()
+        nav_a = ZoneNavigator("A", drive_base_obj=db_a, has_color_sensor=True)
+        nav_a.start(now_ms=0)
+        self.assertEqual(db_a.drives[-1], (DRIVE_SPEED_MM_S, 0))
+
+        # Disallowed zone (Red from White for Type A) triggers backup & CW turn after DISALLOWED_CONFIRM_MS
+        t = 20
+        nav_a.step(t, "White", "Red")
+        self.assertEqual(nav_a.state, "DRIVE")
+        t += DISALLOWED_CONFIRM_MS
+        res = nav_a.step(t, "White", "Red")
+        self.assertIsNone(res)
+        self.assertEqual(nav_a.state, "BACKUP")
+        self.assertEqual(db_a.drives[-1], (-DRIVE_SPEED_MM_S, 0))
+
+        # Complete backup -> enters TURN with +90..+180 deg
+        t += BACKUP_DURATION_MS
+        nav_a.step(t, "White", "White")
+        self.assertEqual(nav_a.state, "TURN")
+        self.assertEqual(len(db_a.turns), 1)
+        turn_angle, wait_flag = db_a.turns[-1]
+        self.assertFalse(wait_flag)
+        self.assertTrue(90 <= turn_angle <= 180)
+
+        # Complete turn -> resumes slow forward drive
+        db_a.is_done = True
+        t += 200
+        nav_a.step(t, "White", "White")
+        self.assertEqual(nav_a.state, "DRIVE")
+        self.assertEqual(db_a.drives[-1], (DRIVE_SPEED_MM_S, 0))
+
+        # Crossing a seam (< EDGE_CONFIRM_MS) into allowed Blue commits without backing up
+        for _ in range(6):
+            t += 50
+            self.assertIsNone(nav_a.step(t, "White", None))
+            self.assertEqual(nav_a.state, "DRIVE")
+        for i in range(ZONE_DEBOUNCE_SAMPLES):
+            t += 20
+            res = nav_a.step(t, "White", "Blue")
+            if i < ZONE_DEBOUNCE_SAMPLES - 1:
+                self.assertIsNone(res)
+            else:
+                self.assertEqual(res, "Blue")
+        self.assertEqual(nav_a.state, "DRIVE")
+
+        # Brief seam misclassification (e.g. White for 150ms on Green->Red seam) must NOT stop Green->Red
+        nav_a.step(t + 20, "Green", "White")
+        nav_a.step(t + 120, "Green", "White")
+        self.assertEqual(nav_a.state, "DRIVE")
+        for i in range(ZONE_DEBOUNCE_SAMPLES):
+            res = nav_a.step(t + 140 + i * 20, "Green", "Red")
+        self.assertEqual(res, "Red")
+
+        # 2. Type B hitting outer edge (None for >= EDGE_CONFIRM_MS) backs up, turns -90..-180,
+        #    and stops backup early if crossing back out
+        db_b = FakeDriveBase()
+        nav_b = ZoneNavigator("B", drive_base_obj=db_b, has_color_sensor=True)
+        nav_b.start(now_ms=0)
+        nav_b.step(20, "Red", None)
+        self.assertEqual(nav_b.state, "DRIVE")
+        t = 20 + EDGE_CONFIRM_MS
+        nav_b.step(t, "Red", None)
+        self.assertEqual(nav_b.state, "BACKUP")
+        # Re-enters Red during backup, then hits opposite border -> turns immediately
+        t += 20
+        nav_b.step(t, "Red", "Red")
+        t += 20
+        nav_b.step(t, "Red", "White")
+        self.assertEqual(nav_b.state, "TURN")
+        self.assertTrue(-180 <= db_b.turns[-1][0] <= -90)
+
+        # 3. No color sensor: None must not trigger edge bounces
+        db_none = FakeDriveBase()
+        nav_none = ZoneNavigator("A", drive_base_obj=db_none, has_color_sensor=False)
+        nav_none.start(now_ms=0)
+        for i in range(10):
+            nav_none.step(i * 20, "White", None)
+        self.assertEqual(nav_none.state, "DRIVE")
+        self.assertEqual(len(db_none.turns), 0)
+
+        # 4. Distance sensor obstacle backup & forward resume without turning (10 cm threshold)
+        from agent_robot import OBSTACLE_CLEAR_SAMPLES, OBSTACLE_RESUME_MM, OBSTACLE_STOP_MM
+
+        self.assertEqual(OBSTACLE_STOP_MM, 100)
+        db_obs = FakeDriveBase()
+        nav_obs = ZoneNavigator("A", drive_base_obj=db_obs, has_color_sensor=True)
+        nav_obs.start(now_ms=0)
+
+        # Obstacle detected closer than 100 mm -> backs up without turning
+        nav_obs.step(20, "White", "White", distance_mm=OBSTACLE_STOP_MM - 10)
+        self.assertEqual(nav_obs.state, "OBSTACLE_BACKUP")
+        self.assertEqual(db_obs.drives[-1], (-DRIVE_SPEED_MM_S, 0))
+        self.assertEqual(len(db_obs.turns), 0)
+
+        # Still inside hysteresis band (< 120 mm) -> keeps backing up
+        nav_obs.step(40, "White", "White", distance_mm=OBSTACLE_RESUME_MM - 5)
+        self.assertEqual(nav_obs.state, "OBSTACLE_BACKUP")
+        self.assertEqual(db_obs.drives[-1], (-DRIVE_SPEED_MM_S, 0))
+
+        # Obstacle cleared (>= 120 mm) for OBSTACLE_CLEAR_SAMPLES -> continues forward without turning
+        for i in range(OBSTACLE_CLEAR_SAMPLES):
+            nav_obs.step(60 + i * 20, "White", "White", distance_mm=OBSTACLE_RESUME_MM)
+        self.assertEqual(nav_obs.state, "DRIVE")
+        self.assertEqual(db_obs.drives[-1], (DRIVE_SPEED_MM_S, 0))
+        self.assertEqual(len(db_obs.turns), 0)
 
 
 if __name__ == "__main__":
