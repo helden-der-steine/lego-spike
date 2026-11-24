@@ -1,0 +1,10 @@
+[project]
+name = "lego-spike"
+version = "0.1.0"
+description = "Multi-robot SIR agent-based simulation on LEGO SPIKE Prime hubs using Pybricks and connectionless BLE broadcasts"
+readme = "README.md"
+requires-python = ">=3.12,<4.0"
+dependencies = [
+    "bleak>=3.1.0",
+    "pybricksdev>=2.3.2",
+]
