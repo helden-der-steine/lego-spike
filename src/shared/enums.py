@@ -6,11 +6,7 @@ On Pybricks MicroPython (which omits stdlib `enum` to save flash/RAM),
 they fall back to lightweight attribute classes with identical string/int values.
 """
 
-try:
-    from enum import IntEnum, StrEnum
-except ImportError:
-    IntEnum = object
-    StrEnum = object
+from shared._compat import IntEnum, StrEnum
 
 
 class AgentType(StrEnum):

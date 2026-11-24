@@ -559,6 +559,7 @@ class TestPybricksAgent(unittest.TestCase):
             finder = ModuleFinder([SRC_DIR])
             finder.run_script(os.path.join(SRC_DIR, script_name))
             self.assertIn("robot.hardware", finder.modules)
+            self.assertIn("shared._compat", finder.modules)
             self.assertIn("shared.enums", finder.modules)
             self.assertIn("shared.models", finder.modules)
             self.assertIn("shared.sim_config", finder.modules)

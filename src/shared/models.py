@@ -1,55 +1,18 @@
 """
 Shared dataclass models for configuration, telemetry, and peer state.
-
-On CPython (host PC), uses stdlib `dataclasses.dataclass`.
-On Pybricks MicroPython (which omits `dataclasses`), uses a lightweight
-fallback decorator supporting keyword initialization, equality, and repr.
 """
 
+from shared._compat import dataclass
 from shared.enums import AgentType, EventName, SIRState, VaccinatedStatus, Zone
 
 NO_CONTACT_ID = "—"
-
-try:
-    from dataclasses import dataclass
-except ImportError:
-    def dataclass(cls=None, **_kwargs):
-        def wrap(c):
-            defaults = {}
-            for k, v in c.__dict__.items():
-                if (
-                    not k.startswith("__")
-                    and not callable(v)
-                    and not isinstance(v, (staticmethod, classmethod, property))
-                ):
-                    defaults[k] = v
-
-            def __init__(self, **kwargs):
-                for k, default in defaults.items():
-                    setattr(self, k, kwargs[k] if k in kwargs else default)
-
-            def __repr__(self):
-                fields = ", ".join(f"{k}={repr(getattr(self, k))}" for k in defaults)
-                return f"{c.__name__}({fields})"
-
-            def __eq__(self, other):
-                if not isinstance(other, c):
-                    return False
-                return all(getattr(self, k) == getattr(other, k) for k in defaults)
-
-            c.__init__ = __init__
-            c.__repr__ = __repr__
-            c.__eq__ = __eq__
-            return c
-
-        return wrap if cls is None else wrap(cls)
 
 
 @dataclass(frozen=True)
 class SimulationConfig:
     enable_movement: bool = True
     max_robots: int = 10
-    zone_order_cw: tuple = (Zone.YELLOW, Zone.BLUE, Zone.GREEN, Zone.RED)
+    zone_order_cw: tuple[str, ...] = (Zone.YELLOW, Zone.BLUE, Zone.GREEN, Zone.RED)
     infection_contact_ms: int = 30000
     infection_check_interval_ms: int = 1000
     infection_prob_per_sec: float = 0.05
@@ -121,10 +84,10 @@ class BlueHSVConfig:
 @dataclass(frozen=True)
 class ColorHSVConfig:
     min_zone_value: int = 22
-    red: RedHSVConfig = None
-    yellow: YellowHSVConfig = None
-    green: GreenHSVConfig = None
-    blue: BlueHSVConfig = None
+    red: RedHSVConfig = RedHSVConfig()
+    yellow: YellowHSVConfig = YellowHSVConfig()
+    green: GreenHSVConfig = GreenHSVConfig()
+    blue: BlueHSVConfig = BlueHSVConfig()
 
 
 @dataclass(frozen=True)
@@ -136,8 +99,8 @@ class HardwareConfig:
     wheel_diameter_mm: int = 56
     axle_track_mm: int = 112
     color_logger_sample_interval_ms: int = 500
-    speaker: SpeakerConfig = None
-    color_hsv: ColorHSVConfig = None
+    speaker: SpeakerConfig = SpeakerConfig()
+    color_hsv: ColorHSVConfig = ColorHSVConfig()
 
 
 @dataclass(frozen=True)
@@ -157,21 +120,21 @@ class RobotConfig:
     vaccinated: bool = False
 
     @property
-    def vaccinated_label(self):
+    def vaccinated_label(self) -> str:
         """Human-readable vaccination label emitted in telemetry logs."""
         return VaccinatedStatus.YES if self.vaccinated else VaccinatedStatus.NO
 
 
 @dataclass(frozen=True)
 class AppConfig:
-    simulation: SimulationConfig = None
-    navigation: NavigationConfig = None
-    hardware: HardwareConfig = None
-    host: HostConfig = None
-    default_robot: RobotConfig = None
-    robots: dict = None
+    simulation: SimulationConfig = SimulationConfig()
+    navigation: NavigationConfig = NavigationConfig()
+    hardware: HardwareConfig = HardwareConfig()
+    host: HostConfig = HostConfig()
+    default_robot: RobotConfig = RobotConfig()
+    robots: dict[int, RobotConfig] | None = None
 
-    def robot_for(self, robot_id):
+    def robot_for(self, robot_id: int) -> RobotConfig:
         """Returns the RobotConfig for `robot_id`, falling back to `default_robot`."""
         if self.robots and robot_id in self.robots:
             return self.robots[robot_id]
@@ -191,7 +154,7 @@ class TelemetryEntry:
     agent_type: str = AgentType.CLOCKWISE
     vaccinated: str = VaccinatedStatus.NO
 
-    def to_dict(self):
+    def to_dict(self) -> dict[str, object]:
         """Serializes to the JSON telemetry log schema."""
         return {
             "Time_Stamp": self.time_stamp,
@@ -212,5 +175,5 @@ class PeerStatus:
     state: str = SIRState.SUSCEPTIBLE
     zone: str = Zone.UNKNOWN
     last_seen_ms: int = 0
-    contact_start_ms: int = None
-    last_roll_ms: int = None
+    contact_start_ms: int | None = None
+    last_roll_ms: int | None = None
