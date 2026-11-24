@@ -1,87 +1,132 @@
 # LEGO SPIKE Prime - Agentic Robot (Pybricks Edition)
 
-This code uses **Pybricks firmware** to enable **true wireless Bluetooth Low Energy (BLE) broadcast synchronization** between multiple SPIKE Prime robots.
+This project runs a multi-robot **SIR (Susceptible–Infected–Recovered) agent-based simulation** on LEGO SPIKE Prime hubs using **Pybricks firmware** and **100% connectionless Bluetooth Low Energy (BLE) broadcasts** (up to 10 robots, IDs `1..10`).
 
 ---
 
-## 1. Quick Setup: Flash Pybricks (Takes 2 minutes)
+## 1. Local Environment Setup (`uv`)
 
-1. Open Chrome or Edge and go to **[https://beta.pybricks.com/](https://beta.pybricks.com/)**.
-2. Connect your SPIKE Prime Hub via USB-C cable.
-3. Click the **gear icon (Settings)** $\to$ **"Install Pybricks firmware"** and follow the on-screen steps.
-4. Do this for both **Robot 1** and **Robot 2**.
-   *(Note: You can revert back to official LEGO firmware at any time with one click if needed).*
+This repository uses **[uv](https://docs.astral.sh/uv/)** to manage Python and dependencies ([pyproject.toml](pyproject.toml) + `uv.lock`).
 
----
+### Installing `uv` (if not already installed)
 
-## 2. Configure & Run the Script (`agent_robot.py`)
+- **Windows (PowerShell)**:
+  ```powershell
+  powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+  ```
+  *(Or via `winget`: `winget install --id=astral-sh.uv -e`)*
+- **macOS / Linux**:
+  ```bash
+  curl -LsSf https://astral.sh/uv/install.sh | sh
+  ```
+- **Official documentation**: [Astral `uv` Installation Guide](https://docs.astral.sh/uv/getting-started/installation/)
 
-Create a new file in the Pybricks web editor and paste [`agent_robot.py`](agent_robot.py):
+Restart your terminal after installation so `uv` is on your `PATH`, then create the `.venv` virtual environment and install all project dependencies (`bleak`, `pybricksdev`, and Pybricks API stubs):
 
-### For Robot 1 (The Master / Initiator):
-```python
-ROBOT_ID = 1
-AGENT_TYPE = "A"            # "A" (turns right) or "B" (turns left)
-INITIAL_INFECTED = True     # True = "I" (Red), False = "S" (Blue)
-VACCINATED = "No"
-```
-
-### For Robot 2 (The Receiver / Follower):
-```python
-ROBOT_ID = 2
-AGENT_TYPE = "B"            # "A" (turns right) or "B" (turns left)
-INITIAL_INFECTED = False    # True = "I" (Red), False = "S" (Blue)
-VACCINATED = "No"
-```
-
----
-
-## 3. 100% Connectionless BLE Broadcast Workflow (`live_ble_receiver.py`)
-
-No BLE GATT connections or pairing are used:
-- **Laptop $\to$ Robots (Channel `0`)**: Your Windows laptop broadcasts `START` (`1`) and `STOP` (`2`) on **BLE Channel `0`** using `BluetoothLEAdvertisementPublisher` (`0x0397` LEGO Manufacturer Data). All robots observe **only Channel `0`**.
-- **Robots $\to$ Laptop (Channels `1..10`)**: Each robot (`ROBOT_ID = 1..10`) broadcasts its Standby status and 1.0s telemetry on its own channel (`1..10`). Your laptop passively listens on **Channels `1..10`**.
-
-### Step 1: Start Robots in Standby
-1. Start [`agent_robot.py`](agent_robot.py) on each robot (`ROBOT_ID = 1, 2, 3, ...`):
-   - Each robot displays its centered `"I"`, `"S"`, or `"R"` icon with an **Orange** status light.
-   - It broadcasts `"STANDBY"` on its channel (`ROBOT_ID`) and listens on **Channel `0`**.
-
-### Step 2: Launch the Central Hub on Windows
-Install `bleak` (which automatically installs the Windows WinRT Bluetooth advertisement packages):
 ```powershell
-pip install bleak
-python live_ble_receiver.py
-```
+# Recommended on Windows (creates/syncs .venv via uv)
+.\venv.ps1
 
-The Central Hub passively listens on Channels `1..10` and detects robots in Standby:
-```text
-📡 Passive BLE Scanner active on Channels 1..10 (waiting for robots in Standby)...
-[12:15:01] 🟠 Robot 1 (Channel 1) READY in Standby | SIR State: I
-[12:15:01] 🟠 Robot 2 (Channel 2) READY in Standby | SIR State: S
-[12:15:02] 🟠 Robot 3 (Channel 3) READY in Standby | SIR State: S
+# Or run uv directly
+uv sync
 ```
 
 ---
 
-## 4. Running Experiments
+## 2. Hub Hardware & Firmware Setup
 
-### Start All Robots (`s` or `ENTER`):
-Press **`s`** (or **`ENTER`**) in the laptop terminal:
-- The laptop broadcasts `START` (`1`) on **BLE Channel `0`**.
-- All robots observing Channel `0` simultaneously reset their timers to $t = 0.0\text{ s}$, beep, and start driving!
-- Live telemetry from Channels `1..10` is logged in real time:
-  ```text
-  [12:15:05] 📡 Ch  1 | Robot 1 | t=  1.0s | State: I | Zone: 0 | Type: A
-  [12:15:05] 📡 Ch  2 | Robot 2 | t=  1.0s | State: S | Zone: 0 | Type: B
-  [12:15:05] 📡 Ch  3 | Robot 3 | t=  1.0s | State: S | Zone: 0 | Type: A
-  ```
+1. **Flash Pybricks Firmware** on each SPIKE Prime hub via **[https://beta.pybricks.com/](https://beta.pybricks.com/)** (Settings $\to$ *Install Pybricks firmware*).
+2. **Name each hub** `Held-1`, `Held-2`, ..., `Held-10` during firmware installation (or in Pybricks settings).
+   - `agent_robot.py` reads the hub's Bluetooth name at startup and automatically maps the number (`1..10`) to its entry in `ROBOT_STATS` and its BLE telemetry channel.
+3. **Hardware Ports** (configured in [agent_robot.py](agent_robot.py)):
+   - `Port.A`: Ultrasonic / Distance Sensor
+   - `Port.B`: Color Sensor
+   - `Port.C`: Left Drive Motor
+   - `Port.D`: Right Drive Motor
 
-### Stop All Robots (`x` or `q`):
-Press **`x`** (or **`q`**) in the terminal:
-- The laptop broadcasts `STOP` (`2`) on **BLE Channel `0`**.
-- All robots observing Channel `0` immediately stop their motors and halt broadcasting.
-- The run is automatically saved (or auto-saved after 10 seconds of silence) to:
-  ```text
-  logs/run_01_YYYYMMDD_HHMMSS.json
+---
+
+## 3. Configure Robots (Optional)
+
+Per-robot parameters (`agent_type`, `initial_infected`, `vaccinated`) are defined centrally in the `ROBOT_STATS` table at the top of [agent_robot.py](agent_robot.py) (and mirrored in [live_ble_receiver.py](live_ble_receiver.py)):
+
+- `agent_type`: `"A"` moves clockwise (`Yellow -> Blue -> Green -> Red`), `"B"` moves counter-clockwise (`Yellow -> Red -> Green -> Blue`).
+- `initial_infected`: `True` starts as `"I"` (Red), `False` starts as `"S"` (Blue).
+- `vaccinated`: `"No"` (or `"Yes"`).
+
+---
+
+## 4. Deploy Scripts to All Robots (`deploy_all.ps1`)
+
+To upload and start `agent_robot.py` on the robots, make sure the hubs are **turned on** and **not connected to the browser**, then simply run [deploy_all.ps1](deploy_all.ps1) in PowerShell:
+
+```powershell
+.\deploy_all.ps1
+```
+
+What it does:
+- Runs [venv.ps1](venv.ps1) to ensure `.venv` is created and synced via `uv`, then uses `.venv\Scripts\pybricksdev.exe`.
+- Connects over BLE to `Held-1` through `Held-10`, uploads [agent_robot.py](agent_robot.py) with `--no-wait`, starts it in **Standby mode**, and disconnects to move on to the next hub.
+- Prints a deployment summary and a ready-to-run retry command if any hub failed.
+
+### Useful Options
+
+```powershell
+# Deploy only to specific robot IDs (e.g., 1, 2, 3)
+.\deploy_all.ps1 -RobotIds 1,2,3
+
+# Deploy a different script or custom hub name prefix
+.\deploy_all.ps1 -ScriptPath color_sensor_logger.py -RobotIds 1 -HubNamePrefix "Held-"
+```
+
+Once deployed, each robot displays its centered SIR icon (`S`, `I`, `R`, or `V`), sets its status light to **Orange**, broadcasts `"STANDBY"` on its own channel (`ROBOT_ID`), and listens on **BLE Channel `0`**.
+
+---
+
+## 5. Run Experiments (`live_ble_receiver.py`)
+
+No BLE GATT connections or pairing are used during experiments:
+- **Laptop $\to$ Robots (Channel `0`)**: Broadcasts `START` (`1`) and `STOP` (`2`) via Windows WinRT `BluetoothLEAdvertisementPublisher` (`0x0397` LEGO Manufacturer Data).
+- **Robots $\to$ Laptop (Channels `1..10`)**: Each robot broadcasts Standby heartbeats and telemetry (`5.0 s` periodic samples plus `Start`, `change_zone`, `Infection`, and `Recovery` events) on its own channel (`ROBOT_ID`).
+
+### Start the Central Hub (Windows)
+
+```powershell
+uv run python live_ble_receiver.py
+```
+
+### Terminal Commands
+
+| Command | Action |
+| :--- | :--- |
+| `s` or `ENTER` | Broadcast `START` on Channel `0` — all robots reset timers to `0.0 s`, beep, and start driving |
+| `x` or `q` | Broadcast `STOP` on Channel `0` — halts all robots and saves the run |
+| `status` | Show detected Standby robots and current run statistics |
+| `save` | Immediately save buffered telemetry to JSON |
+| `help` | Show command menu |
+| `exit` | Quit Central Hub |
+
+*(You can also start/stop an individual hub manually using its `RIGHT` / `LEFT` button.)*
+
+Runs are automatically saved to `logs/run_XX_YYYYMMDD_HHMMSS.json` on `STOP`, when all infected robots have recovered (`5.0 s` confirmation), or after `15.0 s` of telemetry inactivity.
+
+---
+
+## 6. Simulation Rules, Tests & Repository Files
+
+- **SIR Parameters** ([agent_robot.py](agent_robot.py)):
+  - **Infection**: `30 s` co-location in the same valid color zone with an `"I"` robot, then `5%` probability per second.
+  - **Recovery**: `"I"` $\to$ `"R"` after `120 s`.
+  - **Auto-End**: Stops automatically after `3 s` with zero infected robots remaining.
+- **Offline Tests**:
+  ```powershell
+  uv run python -m unittest test_simulation_offline.py
   ```
+- **Repository Files**:
+  - [pyproject.toml](pyproject.toml) — `uv` project configuration and Python dependencies.
+  - [agent_robot.py](agent_robot.py) — Pybricks robot controller, zone navigation, obstacle/edge avoidance, and SIR state machine.
+  - [deploy_all.ps1](deploy_all.ps1) — PowerShell BLE deployment script for hubs `Held-1`..`Held-10`.
+  - [live_ble_receiver.py](live_ble_receiver.py) — Windows BLE broadcast controller and telemetry logger.
+  - [test_simulation_offline.py](test_simulation_offline.py) — Offline unit tests.
+  - [color_sensor_logger.py](color_sensor_logger.py) — Utility to inspect live `ColorSensor` HSV values over zones.
+  - [download_log.py](download_log.py) — Utility to extract and save JSON log dumps from hub console output into `logs/`.

@@ -4,15 +4,21 @@ param(
     [string]$HubNamePrefix = "Held-"
 )
 
-Write-Host "=====================================================" -ForegroundColor Cyan
+# Ensure .venv is created and synced via uv before deploying
+& (Join-Path $PSScriptRoot "venv.ps1")
+if ($LASTEXITCODE -ne 0) {
+    exit $LASTEXITCODE
+}
+
+$pybricksdevExe = Join-Path $PSScriptRoot ".venv\Scripts\pybricksdev.exe"
+if (-not (Test-Path $pybricksdevExe)) {
+    Write-Host "[ERROR] 'pybricksdev.exe' not found at '$pybricksdevExe'." -ForegroundColor Red
+    exit 1
+}
+
+Write-Host "`n=====================================================" -ForegroundColor Cyan
 Write-Host " Deploying '$ScriptPath' to $($RobotIds.Count) Pybricks Hubs" -ForegroundColor Cyan
 Write-Host "=====================================================" -ForegroundColor Cyan
-
-# Check if pybricksdev is installed
-if (-not (Get-Command "pybricksdev" -ErrorAction SilentlyContinue)) {
-    Write-Host "[!] 'pybricksdev' CLI not found. Installing via pip..." -ForegroundColor Yellow
-    pip install pybricksdev
-}
 
 $Success = @()
 $Failed  = @()
@@ -23,7 +29,7 @@ foreach ($id in $RobotIds) {
 
     # --no-wait uploads the script to the hub, starts it (entering Standby mode),
     # and immediately disconnects so we can move on to the next robot.
-    pybricksdev run ble --name "$hubName" --no-wait "$ScriptPath"
+    & $pybricksdevExe run ble --name "$hubName" --no-wait "$ScriptPath"
 
     if ($LASTEXITCODE -eq 0) {
         Write-Host "  [OK] '$hubName' updated and running in Standby!" -ForegroundColor Green
