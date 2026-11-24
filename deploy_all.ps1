@@ -1,5 +1,5 @@
 param(
-    [string]$ScriptPath = "agent_robot.py",
+    [string]$ScriptPath = "src\agent_robot.py",
     [int[]]$RobotIds = 1..10,
     [string]$HubNamePrefix = "Held-"
 )

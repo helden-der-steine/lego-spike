@@ -8,3 +8,11 @@ dependencies = [
     "bleak>=3.1.0",
     "pybricksdev>=2.3.2",
 ]
+
+[build-system]
+requires = ["uv_build>=0.13,<0.14"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-root = "src"
+module-name = ["host", "robot", "shared"]
