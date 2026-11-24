@@ -31,7 +31,9 @@ class MockMatrix:
 
 sys.modules["pybricks.geometry"].Matrix = MockMatrix
 
-from host.ble_codec import decode_pybricks_payload, encode_pybricks_payload
+from enum import Enum
+
+from host.ble_codec import PybricksValueType, decode_pybricks_payload, encode_pybricks_payload
 from host.central_hub import CentralHub
 from host.log_saver import save_json_log
 from robot.hardware import ICON_I, ICON_R, ICON_S, ICON_V, detect_zone
@@ -50,9 +52,8 @@ from robot.navigation import (
     pick_edge_turn_angle,
 )
 from robot.sir_simulation import SIRSimulation
+from shared.enums import AgentType, ControlCommand, EventName, NavState, SIRState, VaccinatedStatus, Zone
 from shared.protocol import (
-    CMD_START,
-    CMD_STOP,
     CONTROL_CHANNEL,
     ROBOT_CHANNELS,
     event_code_from_name,
@@ -67,10 +68,6 @@ from shared.sim_config import (
     NO_INFECTED_END_MS,
     RECOVERY_DURATION_MS,
     ROBOT_STATS,
-    STATE_INFECTED,
-    STATE_RECOVERED,
-    STATE_SUSCEPTIBLE,
-    STATE_VACCINATED,
     ZONE_ORDER_CW,
     config_from_hub_name,
     get_robot_stats,
@@ -88,14 +85,18 @@ class TestPybricksAgent(unittest.TestCase):
                 for val in row:
                     self.assertIn(val, (0, 100), f"Pixel in {name} must be 0 or 100")
 
+    def test_enums_are_stdlib_enums_on_host(self):
+        for enum_cls in (AgentType, Zone, SIRState, VaccinatedStatus, ControlCommand, EventName, NavState, PybricksValueType):
+            self.assertTrue(issubclass(enum_cls, Enum), f"{enum_cls.__name__} must be an Enum on host")
+
     def test_encode_decode_roundtrip_channel_zero_and_telemetry(self):
         # Channel 0 START (1) and STOP (2)
-        p_start = encode_pybricks_payload(0, CMD_START)
+        p_start = encode_pybricks_payload(0, ControlCommand.START)
         ch, vals = decode_pybricks_payload(p_start)
         self.assertEqual(ch, 0)
         self.assertEqual(vals, [1])
 
-        p_stop = encode_pybricks_payload(0, CMD_STOP)
+        p_stop = encode_pybricks_payload(0, ControlCommand.STOP)
         ch, vals = decode_pybricks_payload(p_stop)
         self.assertEqual(ch, 0)
         self.assertEqual(vals, [2])
@@ -162,12 +163,17 @@ class TestPybricksAgent(unittest.TestCase):
             self.assertEqual(by_id[10]["Agent_Type"], "B")
 
     def test_config_from_hub_name(self):
+        from dataclasses import is_dataclass
+        from shared.models import RobotConfig
+
         self.assertEqual(len(ROBOT_STATS), 11)
         self.assertIsNone(ROBOT_STATS[0])
         for rid in range(1, 11):
-            self.assertIn(ROBOT_STATS[rid]["agent_type"], ("A", "B"))
-            self.assertIsInstance(ROBOT_STATS[rid]["initial_infected"], bool)
-            self.assertIn(ROBOT_STATS[rid]["vaccinated"], ("Yes", "No"))
+            self.assertTrue(is_dataclass(ROBOT_STATS[rid]))
+            self.assertIsInstance(ROBOT_STATS[rid], RobotConfig)
+            self.assertIn(ROBOT_STATS[rid].agent_type, ("A", "B"))
+            self.assertIsInstance(ROBOT_STATS[rid].initial_infected, bool)
+            self.assertIn(ROBOT_STATS[rid].vaccinated_label, ("Yes", "No"))
 
         self.assertEqual(parse_robot_id("Held 1"), 1)
         self.assertEqual(parse_robot_id("Held 10"), 10)
@@ -403,36 +409,36 @@ class TestPybricksAgent(unittest.TestCase):
         self.assertEqual(INFECTION_CHECK_INTERVAL_MS, 1000)
         self.assertEqual(INFECTION_PROB_PER_SEC, 0.05)
         self.assertEqual(
-            (STATE_SUSCEPTIBLE, STATE_INFECTED, STATE_RECOVERED, STATE_VACCINATED),
+            (SIRState.SUSCEPTIBLE, SIRState.INFECTED, SIRState.RECOVERED, SIRState.VACCINATED),
             ("S", "I", "R", "V"),
         )
 
         sim = SIRSimulation(initial_infected=False)
-        sim.current_zone = "Red"
+        sim.current_zone = Zone.RED
 
         orig_random = sir_simulation.random.random
         try:
-            sim.observe_peer_packet(2, STATE_INFECTED, "Red", 0)
+            sim.observe_peer_packet(2, SIRState.INFECTED, Zone.RED, 0)
             sir_simulation.random.random = lambda: 0.0
             self.assertIsNone(sim.check_zone_infection(0))
 
-            sim.observe_peer_packet(2, STATE_INFECTED, "Red", 29999)
+            sim.observe_peer_packet(2, SIRState.INFECTED, Zone.RED, 29999)
             self.assertIsNone(sim.check_zone_infection(29999))
-            self.assertEqual(sim.sir_state, STATE_SUSCEPTIBLE)
+            self.assertEqual(sim.sir_state, SIRState.SUSCEPTIBLE)
 
             sir_simulation.random.random = lambda: 0.99
-            sim.observe_peer_packet(2, STATE_INFECTED, "Red", 30000)
+            sim.observe_peer_packet(2, SIRState.INFECTED, Zone.RED, 30000)
             self.assertIsNone(sim.check_zone_infection(30000))
-            self.assertEqual(sim.sir_state, STATE_SUSCEPTIBLE)
+            self.assertEqual(sim.sir_state, SIRState.SUSCEPTIBLE)
 
             sir_simulation.random.random = lambda: 0.0
-            sim.observe_peer_packet(2, STATE_INFECTED, "Red", 30500)
+            sim.observe_peer_packet(2, SIRState.INFECTED, Zone.RED, 30500)
             self.assertIsNone(sim.check_zone_infection(30500))
-            self.assertEqual(sim.sir_state, STATE_SUSCEPTIBLE)
+            self.assertEqual(sim.sir_state, SIRState.SUSCEPTIBLE)
 
-            sim.observe_peer_packet(2, STATE_INFECTED, "Red", 31000)
+            sim.observe_peer_packet(2, SIRState.INFECTED, Zone.RED, 31000)
             self.assertEqual(sim.check_zone_infection(31000), 2)
-            self.assertEqual(sim.sir_state, STATE_INFECTED)
+            self.assertEqual(sim.sir_state, SIRState.INFECTED)
         finally:
             sir_simulation.random.random = orig_random
 
@@ -443,12 +449,12 @@ class TestPybricksAgent(unittest.TestCase):
         self.assertFalse(sim.is_finished(60000))
 
         # Peer 2 is infected -> simulation stays active
-        sim.observe_peer_packet(2, STATE_INFECTED, "Red", 1000)
+        sim.observe_peer_packet(2, SIRState.INFECTED, Zone.RED, 1000)
         self.assertTrue(sim.ever_saw_infected)
         self.assertFalse(sim.is_finished(1000))
 
         # Peer 2 recovers -> finishes after NO_INFECTED_END_MS confirmation
-        sim.observe_peer_packet(2, STATE_RECOVERED, "Red", 2000)
+        sim.observe_peer_packet(2, SIRState.RECOVERED, Zone.RED, 2000)
         self.assertFalse(sim.is_finished(2000))
         self.assertFalse(sim.is_finished(2000 + NO_INFECTED_END_MS - 1))
         self.assertTrue(sim.is_finished(2000 + NO_INFECTED_END_MS))
@@ -460,7 +466,7 @@ class TestPybricksAgent(unittest.TestCase):
             chub.handle_broadcast_packet(2, [2, 0.0, "I", "Red", 1])
             self.assertFalse(chub.is_simulation_finished(now=100.0, confirm_s=5.0))
             chub.handle_broadcast_packet(2, [2, 5.0, "R", "Red", 2, "R"])
-            self.assertEqual(chub.current_run_entries[-1]["Event"], "Recovery")
+            self.assertEqual(chub.current_run_entries[-1].event, EventName.RECOVERY)
             self.assertFalse(chub.is_simulation_finished(now=105.0, confirm_s=5.0))
             self.assertFalse(chub.is_simulation_finished(now=109.9, confirm_s=5.0))
             self.assertTrue(chub.is_simulation_finished(now=110.0, confirm_s=5.0))
@@ -472,55 +478,96 @@ class TestPybricksAgent(unittest.TestCase):
 
         sim = SIRSimulation(initial_infected=False)
         self.assertFalse(sim.check_recovery(200000))
-        self.assertEqual(sim.sir_state, STATE_SUSCEPTIBLE)
+        self.assertEqual(sim.sir_state, SIRState.SUSCEPTIBLE)
 
         # Initially infected robot recovers at exactly 120000 ms
         sim_inf = SIRSimulation(initial_infected=True)
         self.assertFalse(sim_inf.check_recovery(119999))
-        self.assertEqual(sim_inf.sir_state, STATE_INFECTED)
+        self.assertEqual(sim_inf.sir_state, SIRState.INFECTED)
         self.assertTrue(sim_inf.check_recovery(120000))
-        self.assertEqual(sim_inf.sir_state, STATE_RECOVERED)
+        self.assertEqual(sim_inf.sir_state, SIRState.RECOVERED)
         self.assertIsNone(sim_inf.infected_since_ms)
         self.assertFalse(sim_inf.check_recovery(250000))
-        self.assertEqual(sim_inf.sir_state, STATE_RECOVERED)
+        self.assertEqual(sim_inf.sir_state, SIRState.RECOVERED)
 
         # Robot infected during run recovers 120s after infection time and cannot be re-infected
         sim_dyn = SIRSimulation(initial_infected=False)
-        sim_dyn.current_zone = "Blue"
+        sim_dyn.current_zone = Zone.BLUE
         orig_random = sir_simulation.random.random
         try:
             sir_simulation.random.random = lambda: 0.0
-            sim_dyn.observe_peer_packet(2, STATE_INFECTED, "Blue", 1000)
+            sim_dyn.observe_peer_packet(2, SIRState.INFECTED, Zone.BLUE, 1000)
             sim_dyn.check_zone_infection(1000)
-            sim_dyn.observe_peer_packet(2, STATE_INFECTED, "Blue", 31000)
+            sim_dyn.observe_peer_packet(2, SIRState.INFECTED, Zone.BLUE, 31000)
             self.assertEqual(sim_dyn.check_zone_infection(31000), 2)
-            self.assertEqual(sim_dyn.sir_state, STATE_INFECTED)
+            self.assertEqual(sim_dyn.sir_state, SIRState.INFECTED)
             self.assertEqual(sim_dyn.infected_since_ms, 31000)
 
             self.assertFalse(sim_dyn.check_recovery(31000 + RECOVERY_DURATION_MS - 1))
-            self.assertEqual(sim_dyn.sir_state, STATE_INFECTED)
+            self.assertEqual(sim_dyn.sir_state, SIRState.INFECTED)
             self.assertTrue(sim_dyn.check_recovery(31000 + RECOVERY_DURATION_MS))
-            self.assertEqual(sim_dyn.sir_state, STATE_RECOVERED)
+            self.assertEqual(sim_dyn.sir_state, SIRState.RECOVERED)
 
             self.assertIsNone(sim_dyn.check_zone_infection(200000))
-            self.assertEqual(sim_dyn.sir_state, STATE_RECOVERED)
+            self.assertEqual(sim_dyn.sir_state, SIRState.RECOVERED)
         finally:
             sir_simulation.random.random = orig_random
+
+    def test_config_sync_and_validation(self):
+        from copy import deepcopy
+        from dataclasses import is_dataclass
+        import tomllib
+        from host.config_sync import DEFAULT_CONFIG_PATH, load_toml_config, sync_hub_config
+        from shared.config_schema import validate_and_normalize
+
+        cfg = load_toml_config()
+        self.assertTrue(is_dataclass(cfg))
+        self.assertEqual(cfg.simulation.infection_prob_per_sec, 0.05)
+        self.assertEqual(cfg.robots[2].initial_infected, True)
+        self.assertEqual(cfg.default_robot.vaccinated, False)
+
+        with open(DEFAULT_CONFIG_PATH, "rb") as f:
+            raw_toml = tomllib.load(f)
+
+        # Invalid agent_type or out-of-range probability must fail fast
+        bad_prob = deepcopy(raw_toml)
+        bad_prob["simulation"]["infection_prob_per_sec"] = 1.5
+        with self.assertRaises(ValueError):
+            validate_and_normalize(bad_prob)
+
+        bad_port = deepcopy(raw_toml)
+        bad_port["hardware"]["left_motor_port"] = "Z"
+        with self.assertRaises(ValueError):
+            validate_and_normalize(bad_port)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out_file = os.path.join(tmpdir, "generated_config.py")
+            sync_hub_config(output_path=out_file)
+            self.assertTrue(os.path.exists(out_file))
+            namespace = {}
+            with open(out_file, "r", encoding="utf-8") as f:
+                exec(f.read(), namespace)
+            self.assertEqual(namespace["CONFIG"], cfg)
 
     def test_pybricks_module_discovery(self):
         """Verifies Pybricks ModuleFinder resolves all robot/* and shared/* imports."""
         from modulefinder import ModuleFinder
+        from host.config_sync import sync_hub_config
 
-        for script_name in ("agent_robot.py", "color_sensor_logger.py"):
+        sync_hub_config()
+        for script_name in ("run_robot.py", "run_color_sensor_logger.py"):
             finder = ModuleFinder([SRC_DIR])
             finder.run_script(os.path.join(SRC_DIR, script_name))
             self.assertIn("robot.hardware", finder.modules)
-            if script_name == "agent_robot.py":
+            self.assertIn("shared.enums", finder.modules)
+            self.assertIn("shared.models", finder.modules)
+            self.assertIn("shared.sim_config", finder.modules)
+            self.assertIn("shared.config_schema", finder.modules)
+            if script_name == "run_robot.py":
                 self.assertIn("robot.controller", finder.modules)
                 self.assertIn("robot.navigation", finder.modules)
                 self.assertIn("robot.sir_simulation", finder.modules)
                 self.assertIn("shared.protocol", finder.modules)
-                self.assertIn("shared.sim_config", finder.modules)
 
 
 if __name__ == "__main__":

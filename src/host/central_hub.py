@@ -11,40 +11,39 @@ Architecture (No BLE GATT Connections):
   Robots 1..10 on Channels 1..10.
 - Auto-Save:
   Saves each run to logs/run_XX_YYYYMMDD_HHMMSS.json when stopped, when all
-  infected robots have recovered, or after 15 seconds without telemetry packets.
+  infected robots have recovered, or after inactivity timeout.
 """
 
 import asyncio
+from dataclasses import dataclass
+from datetime import datetime
 import json
 import os
 import sys
 import time
-from datetime import datetime
 
 from bleak import BleakScanner
 
 from host.ble_broadcaster import ChannelZeroBroadcaster, DEFAULT_BROADCAST_DURATION_S
 from host.ble_codec import decode_pybricks_payload
+from shared.enums import ControlCommand, EventCode, EventName, SIRState
+from shared.models import TelemetryEntry
 from shared.protocol import (
-    CMD_START,
-    CMD_STOP,
     CONTROL_CHANNEL,
-    EVENT_CODE_SAMPLE,
-    EVENT_SAMPLE,
     LEGO_COMPANY_ID,
     ROBOT_CHANNELS,
     STANDBY_TAG,
-    build_log_entry,
+    build_telemetry_entry,
     event_name_from_code,
 )
-from shared.sim_config import STATE_INFECTED, STATE_UNKNOWN, get_robot_stats
+from shared.sim_config import HOST_CONFIG, get_robot_stats
 
-INACTIVITY_TIMEOUT_SECONDS = 15.0
-NO_INFECTED_END_SECONDS = 5.0
-POLL_INTERVAL_SECONDS = 0.5
-POST_STOP_FLUSH_SECONDS = 0.5
+INACTIVITY_TIMEOUT_SECONDS = HOST_CONFIG.inactivity_timeout_ms / 1000.0
+NO_INFECTED_END_SECONDS = HOST_CONFIG.no_infected_end_ms / 1000.0
+POLL_INTERVAL_SECONDS = HOST_CONFIG.poll_interval_ms / 1000.0
+POST_STOP_FLUSH_SECONDS = HOST_CONFIG.post_stop_flush_ms / 1000.0
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-OUTPUT_DIR = os.path.join(PROJECT_ROOT, "logs")
+OUTPUT_DIR = os.path.join(PROJECT_ROOT, HOST_CONFIG.logs_dir)
 
 TIMESTAMP_FILE_FMT = "%Y%m%d_%H%M%S"
 TIMESTAMP_LOG_FMT = "%H:%M:%S"
@@ -56,6 +55,16 @@ STATUS_COMMANDS = ("status", "list")
 SAVE_COMMANDS = ("save",)
 HELP_COMMANDS = ("h", "help")
 EXIT_COMMANDS = ("exit", "quit")
+
+
+@dataclass
+class StandbyRobot:
+    """Tracks a robot detected in Standby mode before a run starts."""
+
+    robot_id: int
+    channel: int
+    sir_state: str
+    last_seen: float
 
 
 class CentralHub:
@@ -72,13 +81,13 @@ class CentralHub:
         self.observe_channels = set(observe_channels)
         self.broadcaster = ChannelZeroBroadcaster(CONTROL_CHANNEL)
 
-        self.standby_robots = {}      # robot_id -> (channel, sir_state, last_seen)
-        self.current_run_entries = []
-        self.seen_signatures = set()  # (robot_id, seq_num)
-        self.robot_states = {}        # robot_id -> latest SIR_State in current run
+        self.standby_robots: dict[int, StandbyRobot] = {}
+        self.current_run_entries: list[TelemetryEntry] = []
+        self.seen_signatures: set[tuple] = set()
+        self.robot_states: dict[int, str] = {}
         self.ever_saw_infected = False
-        self.no_infected_since = None
-        self.last_packet_time = None
+        self.no_infected_since: float | None = None
+        self.last_packet_time: float | None = None
         self.run_started = False
         self.run_number = 1
         self._running = True
@@ -103,7 +112,7 @@ class CentralHub:
         if not self.run_started or not self.ever_saw_infected:
             self.no_infected_since = None
             return False
-        if any(state == STATE_INFECTED for state in self.robot_states.values()):
+        if any(state == SIRState.INFECTED for state in self.robot_states.values()):
             self.no_infected_since = None
             return False
 
@@ -113,38 +122,43 @@ class CentralHub:
             return False
         return (current_time - self.no_infected_since) >= confirm_s
 
-    def record_entry(self, entry: dict, seq_num: int | None = None) -> None:
+    def record_entry(self, entry: TelemetryEntry, seq_num: int | None = None) -> None:
         """Deduplicates and stores a telemetry event from Channels 1..10."""
         sig = (
-            (entry["ID"], seq_num)
+            (entry.robot_id, seq_num)
             if seq_num is not None
-            else (entry["ID"], entry["Time_Stamp"], entry["Event"])
+            else (entry.robot_id, entry.time_stamp, entry.event)
         )
         if sig in self.seen_signatures:
             return
 
         self.seen_signatures.add(sig)
         self.current_run_entries.append(entry)
-        self.robot_states[entry["ID"]] = entry["SIR_State"]
-        if entry["SIR_State"] == STATE_INFECTED:
+        self.robot_states[entry.robot_id] = entry.sir_state
+        if entry.sir_state == SIRState.INFECTED:
             self.ever_saw_infected = True
             self.no_infected_since = None
         self.last_packet_time = time.time()
         self.run_started = True
 
         time_str = datetime.now().strftime(TIMESTAMP_LOG_FMT)
-        event_str = f" | Event: {entry['Event']}" if entry["Event"] != EVENT_SAMPLE else ""
+        event_str = f" | Event: {entry.event}" if entry.event != EventName.SAMPLE else ""
         print(
-            f"[{time_str}] 📡 Ch {entry['ID']:2d} | Robot {entry['ID']} | "
-            f"t={entry['Time_Stamp']:5.1f}s | State: {entry['SIR_State']:1} | "
-            f"Zone: {entry['Zone']} | Type: {entry['Agent_Type']}{event_str}"
+            f"[{time_str}] 📡 Ch {entry.robot_id:2d} | Robot {entry.robot_id} | "
+            f"t={entry.time_stamp:5.1f}s | State: {entry.sir_state:1} | "
+            f"Zone: {entry.zone} | Type: {entry.agent_type}{event_str}"
         )
 
     def _handle_standby_packet(self, channel: int, values: list) -> None:
         rid = int(values[1]) if len(values) >= 2 else channel
-        state = str(values[2]) if len(values) >= 3 else STATE_UNKNOWN
+        state = str(values[2]) if len(values) >= 3 else SIRState.UNKNOWN
         is_new = rid not in self.standby_robots
-        self.standby_robots[rid] = (channel, state, time.time())
+        self.standby_robots[rid] = StandbyRobot(
+            robot_id=rid,
+            channel=channel,
+            sir_state=state,
+            last_seen=time.time(),
+        )
         if is_new:
             time_str = datetime.now().strftime(TIMESTAMP_LOG_FMT)
             print(
@@ -170,18 +184,18 @@ class CentralHub:
             sir_state = str(values[2])
             zone = str(values[3])
             seq_num = int(values[4]) if len(values) >= 5 else None
-            event_code = str(values[5]) if len(values) >= 6 else EVENT_CODE_SAMPLE
+            event_code = str(values[5]) if len(values) >= 6 else EventCode.SAMPLE
             event_name = event_name_from_code(event_code)
 
             stats = get_robot_stats(robot_id)
-            entry = build_log_entry(
+            entry = build_telemetry_entry(
                 timestamp_s=elapsed_s,
                 robot_id=robot_id,
                 event_name=event_name,
                 zone=zone,
                 sir_state=sir_state,
-                agent_type=stats["agent_type"],
-                vaccinated=stats["vaccinated"],
+                agent_type=stats.agent_type,
+                vaccinated=stats.vaccinated_label,
             )
             self.record_entry(entry, seq_num=seq_num)
 
@@ -198,7 +212,7 @@ class CentralHub:
         self.last_packet_time = time.time()
 
         ok = await self.broadcaster.broadcast_command(
-            CMD_START, duration_s=DEFAULT_BROADCAST_DURATION_S
+            ControlCommand.START, duration_s=DEFAULT_BROADCAST_DURATION_S
         )
         if ok:
             print(
@@ -213,7 +227,7 @@ class CentralHub:
         print(DIVIDER_LINE)
 
         ok = await self.broadcaster.broadcast_command(
-            CMD_STOP, duration_s=DEFAULT_BROADCAST_DURATION_S
+            ControlCommand.STOP, duration_s=DEFAULT_BROADCAST_DURATION_S
         )
         if ok:
             print("✅ STOP broadcast finished! All robots halted.")
@@ -235,16 +249,15 @@ class CentralHub:
         filepath = os.path.join(self.output_dir, filename)
 
         sorted_entries = sorted(
-            self.current_run_entries, key=lambda row: (row["Time_Stamp"], row["ID"])
+            self.current_run_entries, key=lambda row: (row.time_stamp, row.robot_id)
         )
 
         with open(filepath, "w", encoding="utf-8") as f:
-            json.dump(sorted_entries, f, indent=2)
+            json.dump([entry.to_dict() for entry in sorted_entries], f, indent=2)
 
-        robot_counts = {}
+        robot_counts: dict[int, int] = {}
         for entry in sorted_entries:
-            rid = entry["ID"]
-            robot_counts[rid] = robot_counts.get(rid, 0) + 1
+            robot_counts[entry.robot_id] = robot_counts.get(entry.robot_id, 0) + 1
 
         print(f"\n{DIVIDER_LINE}")
         print(f"✅ RUN #{self.run_number} COMPLETE & SAVED!")
@@ -289,11 +302,13 @@ def print_status(hub: CentralHub) -> None:
     print("Listening Channels: 1..10")
     print(f"Robots Seen in Standby ({len(hub.standby_robots)}):")
     if not hub.standby_robots:
-        print("  • (None detected yet - start agent_robot.py on the hubs)")
+        print("  • (None detected yet - start src/run_robot.py on the hubs)")
     else:
-        for rid, (ch, state, ts) in sorted(hub.standby_robots.items()):
-            ago = time.time() - ts
-            print(f"  • Robot {rid} (Channel {ch}) | State: {state} | seen {ago:.0f}s ago")
+        for rid, robot in sorted(hub.standby_robots.items()):
+            ago = time.time() - robot.last_seen
+            print(
+                f"  • Robot {rid} (Channel {robot.channel}) | State: {robot.sir_state} | seen {ago:.0f}s ago"
+            )
     print(f"Current Run      : #{hub.run_number}")
     print(f"Run Active       : {'YES' if hub.run_started else 'NO (Standby)'}")
     print(f"Buffered Entries : {len(hub.current_run_entries)}")

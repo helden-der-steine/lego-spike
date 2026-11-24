@@ -10,9 +10,9 @@ import os
 import sys
 import time
 
-from shared.sim_config import LOG_DUMP_END_MARKER, LOG_DUMP_START_MARKER
+from shared.sim_config import HOST_CONFIG, LOG_DUMP_END_MARKER, LOG_DUMP_START_MARKER
 
-LOGS_DIR = "logs"
+LOGS_DIR = HOST_CONFIG.logs_dir
 TIMESTAMP_FMT = "%Y%m%d_%H%M%S"
 DEFAULT_ROBOT_ID = 1
 

@@ -30,20 +30,15 @@ from robot.hardware import (
 )
 from robot.navigation import ZoneNavigator
 from robot.sir_simulation import SIRSimulation
+from shared.enums import ControlCommand, EventName
+from shared.models import NO_CONTACT_ID
 from shared.protocol import (
-    CMD_START,
     CMD_START_STR,
-    CMD_STOP,
     CMD_STOP_STR,
     CONTROL_CHANNEL,
-    EVENT_CHANGE_ZONE,
-    EVENT_INFECTION,
-    EVENT_RECOVERY,
-    EVENT_SAMPLE,
-    EVENT_START,
     ROBOT_CHANNELS,
     STANDBY_TAG,
-    build_log_entry,
+    build_telemetry_entry,
     event_code_from_name,
 )
 from shared.sim_config import (
@@ -51,12 +46,12 @@ from shared.sim_config import (
     LOG_DUMP_END_MARKER,
     LOG_DUMP_START_MARKER,
     LOG_INTERVAL_MS,
-    NO_CONTACT_ID,
+    NAV_CONFIG,
     config_from_hub_name,
     get_robot_stats,
 )
 
-LOOP_TICK_MS = 20
+LOOP_TICK_MS = NAV_CONFIG.loop_tick_ms
 HUB_LOG_FILENAME = "log.json"
 CSV_HEADER = "Time_Stamp,ID,Event,Zone,SIR_State,Contact_ID,Agent_Type,Vaccinated"
 
@@ -64,7 +59,7 @@ CSV_HEADER = "Time_Stamp,ID,Event,Zone,SIR_State,Contact_ID,Agent_Type,Vaccinate
 _probe_hub = PrimeHub(observe_channels=[CONTROL_CHANNEL] + list(ROBOT_CHANNELS))
 HUB_NAME = get_hub_name(_probe_hub)
 ROBOT_ID, AGENT_TYPE, INITIAL_INFECTED = config_from_hub_name(HUB_NAME)
-VACCINATED = get_robot_stats(ROBOT_ID)["vaccinated"]
+VACCINATED = get_robot_stats(ROBOT_ID).vaccinated_label
 BROADCAST_CHANNEL = ROBOT_ID
 del _probe_hub
 gc.collect()
@@ -84,11 +79,11 @@ color_sensor = init_color_sensor()
 distance_sensor = init_distance_sensor()
 
 
-def log_sample(event_name=EVENT_SAMPLE, contact_id=NO_CONTACT_ID):
+def log_sample(event_name=EventName.SAMPLE, contact_id=NO_CONTACT_ID):
     """Records a telemetry row locally and broadcasts it on channel ROBOT_ID."""
     global seq_num
     elapsed_s = round(stopwatch.time() / 1000.0, 1)
-    entry = build_log_entry(
+    entry = build_telemetry_entry(
         timestamp_s=elapsed_s,
         robot_id=ROBOT_ID,
         event_name=event_name,
@@ -159,10 +154,10 @@ def check_laptop_command():
 
     if obs is None:
         return None
-    if _matches_command(obs, CMD_START, CMD_START_STR):
-        return CMD_START
-    if _matches_command(obs, CMD_STOP, CMD_STOP_STR):
-        return CMD_STOP
+    if _matches_command(obs, ControlCommand.START, CMD_START_STR):
+        return ControlCommand.START
+    if _matches_command(obs, ControlCommand.STOP, CMD_STOP_STR):
+        return ControlCommand.STOP
     return None
 
 
@@ -177,12 +172,11 @@ def wait_for_start():
         pass
 
     print(
-        f"\n[ROBOT {ROBOT_ID}] Standby (listening on BLE Channel {CONTROL_CHANNEL}, "
-        f"broadcasting on Channel {BROADCAST_CHANNEL})..."
+        f"\n[ROBOT {ROBOT_ID}] Standby (listening on BLE Channel {CONTROL_CHANNEL}, broadcasting on Channel {BROADCAST_CHANNEL})..."
     )
 
     while True:
-        if check_laptop_command() == CMD_START or Button.RIGHT in hub.buttons.pressed():
+        if check_laptop_command() == ControlCommand.START or Button.RIGHT in hub.buttons.pressed():
             print(f"[ROBOT {ROBOT_ID}] START broadcast received on Channel {CONTROL_CHANNEL}! Starting...")
             break
         wait(LOOP_TICK_MS)
@@ -204,14 +198,15 @@ def _shutdown():
     hub.display.off()
     hub.speaker.beep(frequency=BEEP_STOP_FREQ_HZ, duration=BEEP_STOP_DURATION_MS)
 
+    serialized_logs = [entry.to_dict() for entry in log_entries]
     try:
         with open(HUB_LOG_FILENAME, "w") as f:
-            json.dump(log_entries, f)
+            json.dump(serialized_logs, f)
     except Exception:
         pass
 
     print(f"\n{LOG_DUMP_START_MARKER}")
-    print(json.dumps(log_entries))
+    print(json.dumps(serialized_logs))
     print(LOG_DUMP_END_MARKER)
 
 
@@ -224,7 +219,7 @@ def main():
         sim.current_zone = initial_zone
 
     print(CSV_HEADER)
-    log_sample(EVENT_START)
+    log_sample(EventName.START)
 
     navigator = ZoneNavigator(
         AGENT_TYPE,
@@ -237,7 +232,7 @@ def main():
     last_log_ms = 0
 
     while True:
-        if check_laptop_command() == CMD_STOP or Button.LEFT in hub.buttons.pressed():
+        if check_laptop_command() == ControlCommand.STOP or Button.LEFT in hub.buttons.pressed():
             print(f"[ROBOT {ROBOT_ID}] STOP broadcast received on Channel {CONTROL_CHANNEL}! Halting...")
             break
 
@@ -256,7 +251,7 @@ def main():
         if new_zone is not None:
             sim.current_zone = new_zone
             sim.clear_peer_contact()
-            log_sample(EVENT_CHANGE_ZONE)
+            log_sample(EventName.CHANGE_ZONE)
 
         # 1. Peer observation and co-location infection check
         observe_peers(now_ms)
@@ -264,13 +259,13 @@ def main():
         if contact_id is not None:
             show_state(hub, sim.sir_state)
             hub.speaker.beep(frequency=BEEP_INFECTION_FREQ_HZ, duration=BEEP_EVENT_DURATION_MS)
-            log_sample(EVENT_INFECTION, contact_id=contact_id)
+            log_sample(EventName.INFECTION, contact_id=contact_id)
 
         # 2. Recovery check
         if sim.check_recovery(now_ms):
             show_state(hub, sim.sir_state)
             hub.speaker.beep(frequency=BEEP_RECOVERY_FREQ_HZ, duration=BEEP_EVENT_DURATION_MS)
-            log_sample(EVENT_RECOVERY)
+            log_sample(EventName.RECOVERY)
 
         # 3. End simulation once no infected robots remain
         if sim.is_finished(now_ms):
@@ -279,7 +274,7 @@ def main():
 
         # 4. Periodic telemetry snapshot
         if now_ms - last_log_ms >= LOG_INTERVAL_MS:
-            log_sample(EVENT_SAMPLE)
+            log_sample(EventName.SAMPLE)
             last_log_ms = now_ms
 
         wait(LOOP_TICK_MS)

@@ -6,6 +6,8 @@ Pure Python so it can run on both the Pybricks hub (MicroPython) and host unit t
 
 import random
 
+from shared.enums import SIRState, Zone
+from shared.models import PeerStatus
 from shared.sim_config import (
     INFECTION_CHECK_INTERVAL_MS,
     INFECTION_CONTACT_MS,
@@ -14,10 +16,6 @@ from shared.sim_config import (
     PEER_CONTACT_TIMEOUT_MS,
     PEER_STATE_TIMEOUT_MS,
     RECOVERY_DURATION_MS,
-    STATE_INFECTED,
-    STATE_RECOVERED,
-    STATE_SUSCEPTIBLE,
-    ZONE_UNKNOWN,
 )
 
 
@@ -26,65 +24,71 @@ class SIRSimulation:
 
     def __init__(self, initial_infected=False):
         self.initial_infected = initial_infected
-        self.sir_state = STATE_INFECTED if initial_infected else STATE_SUSCEPTIBLE
+        self.sir_state = SIRState.INFECTED if initial_infected else SIRState.SUSCEPTIBLE
         self.infected_since_ms = 0 if initial_infected else None
-        self.current_zone = ZONE_UNKNOWN
-        self.peer_contact_start = {}
-        self.peer_last_seen = {}
-        self.peer_last_roll = {}
-        self.peer_states = {}
-        self.peer_zones = {}
-        self.ever_saw_infected = (self.sir_state == STATE_INFECTED)
+        self.current_zone = Zone.UNKNOWN
+        self.peers = {}  # robot_id -> PeerStatus
+        self.ever_saw_infected = (self.sir_state == SIRState.INFECTED)
         self.no_infected_since = None
 
     def reset_run(self):
         """Resets run-scoped peer tracking and infection/end timers."""
-        self.clear_peer_contact()
-        self.peer_last_seen.clear()
-        self.peer_states.clear()
-        self.peer_zones.clear()
-        self.ever_saw_infected = (self.sir_state == STATE_INFECTED)
-        self.infected_since_ms = 0 if self.sir_state == STATE_INFECTED else None
+        self.peers.clear()
+        self.ever_saw_infected = (self.sir_state == SIRState.INFECTED)
+        self.infected_since_ms = 0 if self.sir_state == SIRState.INFECTED else None
         self.no_infected_since = None
 
     def clear_peer_contact(self, other_id=None):
         """Clears co-location contact timers for one peer, or all peers if `other_id` is None."""
         if other_id is None:
-            self.peer_contact_start.clear()
-            self.peer_last_roll.clear()
-        else:
-            self.peer_contact_start.pop(other_id, None)
-            self.peer_last_roll.pop(other_id, None)
+            for peer in self.peers.values():
+                peer.contact_start_ms = None
+                peer.last_roll_ms = None
+        elif other_id in self.peers:
+            self.peers[other_id].contact_start_ms = None
+            self.peers[other_id].last_roll_ms = None
 
     def observe_peer_packet(self, other_id, other_state, other_zone, now_ms):
         """Records a decoded peer telemetry broadcast."""
-        self.peer_states[other_id] = other_state
-        self.peer_zones[other_id] = other_zone
-        self.peer_last_seen[other_id] = now_ms
-        if other_state == STATE_INFECTED:
+        peer = self.peers.get(other_id)
+        if peer is None:
+            self.peers[other_id] = PeerStatus(
+                state=other_state,
+                zone=other_zone,
+                last_seen_ms=now_ms,
+            )
+        else:
+            peer.state = other_state
+            peer.zone = other_zone
+            peer.last_seen_ms = now_ms
+
+        if other_state == SIRState.INFECTED:
             self.ever_saw_infected = True
 
     def expire_stale_peer(self, ch, now_ms):
         """Expires contact and state records for a peer channel that has gone silent."""
-        if ch in self.peer_contact_start and now_ms - self.peer_last_seen.get(ch, now_ms) > PEER_CONTACT_TIMEOUT_MS:
-            self.clear_peer_contact(ch)
-        if ch in self.peer_states and now_ms - self.peer_last_seen.get(ch, now_ms) > PEER_STATE_TIMEOUT_MS:
-            self.peer_states.pop(ch, None)
-            self.peer_zones.pop(ch, None)
-            self.peer_last_seen.pop(ch, None)
+        peer = self.peers.get(ch)
+        if peer is None:
+            return
+        silent_ms = now_ms - peer.last_seen_ms
+        if silent_ms > PEER_STATE_TIMEOUT_MS:
+            self.peers.pop(ch, None)
+        elif silent_ms > PEER_CONTACT_TIMEOUT_MS:
+            peer.contact_start_ms = None
+            peer.last_roll_ms = None
 
     def has_any_infected(self):
-        """Returns True if this robot or any active peer is currently in STATE_INFECTED."""
-        if self.sir_state == STATE_INFECTED:
+        """Returns True if this robot or any active peer is currently in SIRState.INFECTED."""
+        if self.sir_state == SIRState.INFECTED:
             return True
-        return any(state == STATE_INFECTED for state in self.peer_states.values())
+        return any(peer.state == SIRState.INFECTED for peer in self.peers.values())
 
     def is_finished(self, now_ms):
         """
         Returns True once at least one robot was infected during this run,
         no robot remains infected, and that condition holds for NO_INFECTED_END_MS.
         """
-        if self.sir_state == STATE_INFECTED:
+        if self.sir_state == SIRState.INFECTED:
             self.ever_saw_infected = True
         if not self.ever_saw_infected or self.has_any_infected():
             self.no_infected_since = None
@@ -96,14 +100,13 @@ class SIRSimulation:
 
         return (now_ms - self.no_infected_since) >= NO_INFECTED_END_MS
 
-    def _should_roll_infection(self, other_id, now_ms):
+    def _should_roll_infection(self, peer, now_ms):
         """Enforces one infection roll per INFECTION_CHECK_INTERVAL_MS after contact threshold."""
-        last_roll = self.peer_last_roll.get(other_id)
-        if last_roll is None:
-            self.peer_last_roll[other_id] = now_ms
+        if peer.last_roll_ms is None:
+            peer.last_roll_ms = now_ms
             return True
-        if now_ms - last_roll >= INFECTION_CHECK_INTERVAL_MS:
-            self.peer_last_roll[other_id] = last_roll + INFECTION_CHECK_INTERVAL_MS
+        if now_ms - peer.last_roll_ms >= INFECTION_CHECK_INTERVAL_MS:
+            peer.last_roll_ms += INFECTION_CHECK_INTERVAL_MS
             return True
         return False
 
@@ -115,28 +118,29 @@ class SIRSimulation:
         at least INFECTION_CONTACT_MS, rolls once per second with INFECTION_PROB_PER_SEC.
         Returns the infecting peer's ID if infection occurred, else None.
         """
-        if self.sir_state != STATE_SUSCEPTIBLE or self.current_zone == ZONE_UNKNOWN:
+        if self.sir_state != SIRState.SUSCEPTIBLE or self.current_zone == Zone.UNKNOWN:
             self.clear_peer_contact()
             return None
 
-        for other_id, other_state in list(self.peer_states.items()):
-            if now_ms - self.peer_last_seen.get(other_id, now_ms) > PEER_CONTACT_TIMEOUT_MS:
-                self.clear_peer_contact(other_id)
+        for other_id, peer in list(self.peers.items()):
+            if now_ms - peer.last_seen_ms > PEER_CONTACT_TIMEOUT_MS:
+                peer.contact_start_ms = None
+                peer.last_roll_ms = None
                 continue
 
-            other_zone = self.peer_zones.get(other_id)
-            if other_state == STATE_INFECTED and other_zone == self.current_zone:
-                if other_id not in self.peer_contact_start:
-                    self.peer_contact_start[other_id] = now_ms
-                elif now_ms - self.peer_contact_start[other_id] >= INFECTION_CONTACT_MS:
-                    if self._should_roll_infection(other_id, now_ms) and random.random() < INFECTION_PROB_PER_SEC:
-                        self.sir_state = STATE_INFECTED
+            if peer.state == SIRState.INFECTED and peer.zone == self.current_zone:
+                if peer.contact_start_ms is None:
+                    peer.contact_start_ms = now_ms
+                elif now_ms - peer.contact_start_ms >= INFECTION_CONTACT_MS:
+                    if self._should_roll_infection(peer, now_ms) and random.random() < INFECTION_PROB_PER_SEC:
+                        self.sir_state = SIRState.INFECTED
                         self.infected_since_ms = now_ms
                         self.ever_saw_infected = True
                         self.clear_peer_contact()
                         return other_id
             else:
-                self.clear_peer_contact(other_id)
+                peer.contact_start_ms = None
+                peer.last_roll_ms = None
 
         return None
 
@@ -145,13 +149,13 @@ class SIRSimulation:
         Transitions an infected robot to recovered once it has been infected
         for at least RECOVERY_DURATION_MS. Returns True if recovery occurred.
         """
-        if self.sir_state != STATE_INFECTED:
+        if self.sir_state != SIRState.INFECTED:
             return False
         if self.infected_since_ms is None:
             self.infected_since_ms = now_ms
             return False
         if now_ms - self.infected_since_ms >= RECOVERY_DURATION_MS:
-            self.sir_state = STATE_RECOVERED
+            self.sir_state = SIRState.RECOVERED
             self.infected_since_ms = None
             return True
         return False

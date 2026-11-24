@@ -1,0 +1,153 @@
+# ==============================================================================
+# LEGO SPIKE Prime SIR Simulation Configuration
+# ==============================================================================
+# - The host PC reads this file live on startup (`uv run python -m host`).
+# - `deploy_script.ps1` automatically compiles it into `src/shared/generated_config.py`
+#   before uploading to the SPIKE Prime hubs.
+# - All time durations are in milliseconds (*_ms).
+# ==============================================================================
+
+[simulation]
+enable_movement = true
+max_robots = 10
+
+# Clockwise zone ring order (Type A moves forward, Type B moves in reverse)
+zone_order_cw = ["Yellow", "Blue", "Green", "Red"]
+
+# SIR epidemiological rules
+infection_contact_ms = 30000         # Co-location time in same zone before rolls start
+infection_check_interval_ms = 1000   # Interval between infection rolls
+infection_prob_per_sec = 0.05        # Infection probability per roll (0.0 .. 1.0)
+recovery_duration_ms = 120000        # Duration in 'I' before transitioning to 'R'
+
+# Telemetry & peer-tracking timeouts
+log_interval_ms = 5000               # Periodic snapshot interval
+peer_contact_timeout_ms = 2500       # Drop co-location timer if peer silent longer than this
+peer_state_timeout_ms = 15000        # Expire peer SIR state if silent longer than this
+no_infected_end_ms = 3000            # Confirm 0 infected robots for this long before stopping
+
+[navigation]
+drive_speed_mm_s = 35
+drive_accel_mm_s2 = 100
+turn_speed_deg_s = 45
+turn_accel_deg_s2 = 120
+
+edge_confirm_ms = 400                # Seam crossing grace window before treating None as edge
+backup_duration_ms = 1000            # Max reverse duration when backing away from edge/border
+edge_turn_min_deg = 45
+edge_turn_max_deg = 110
+zone_debounce_samples = 3
+disallowed_confirm_ms = 350
+
+obstacle_stop_mm = 80                # Trigger backup when obstacle is closer than this
+obstacle_resume_mm = 100             # Clear distance hysteresis before turning away
+obstacle_clear_samples = 3
+loop_tick_ms = 20
+
+[hardware]
+left_motor_port = "C"
+right_motor_port = "D"
+color_sensor_port = "B"
+distance_sensor_port = "A"
+wheel_diameter_mm = 56
+axle_track_mm = 112
+color_logger_sample_interval_ms = 500
+
+[hardware.speaker]
+start_freq_hz = 1000
+start_duration_ms = 200
+infection_freq_hz = 600
+recovery_freq_hz = 800
+event_duration_ms = 150
+stop_freq_hz = 400
+stop_duration_ms = 300
+
+[hardware.color_hsv]
+min_zone_value = 22
+
+[hardware.color_hsv.Red]
+hue_low_max = 15
+hue_high_min = 330
+min_saturation = 65
+
+[hardware.color_hsv.Yellow]
+hue_min = 20
+hue_max = 55
+min_saturation = 55
+min_value = 35
+
+[hardware.color_hsv.Green]
+hue_min = 95
+hue_max = 165
+min_saturation = 35
+
+[hardware.color_hsv.Blue]
+hue_min = 175
+hue_max = 235
+min_saturation = 60
+
+[host]
+inactivity_timeout_ms = 15000        # Auto-save run if no telemetry arrives for this long
+no_infected_end_ms = 5000            # Confirm 0 infected robots on host before sending STOP
+broadcast_duration_ms = 1800         # Duration to advertise START/STOP on BLE Channel 0
+poll_interval_ms = 500
+post_stop_flush_ms = 500
+logs_dir = "logs"
+
+# ==============================================================================
+# Robot Roster (IDs 1..10 matched from hub Bluetooth name, e.g. "Held-1")
+# ==============================================================================
+[robots.default]
+agent_type = "A"
+initial_infected = false
+vaccinated = false
+
+[robots.1]
+agent_type = "A"
+initial_infected = false
+vaccinated = false
+
+[robots.2]
+agent_type = "A"
+initial_infected = true
+vaccinated = false
+
+[robots.3]
+agent_type = "A"
+initial_infected = false
+vaccinated = false
+
+[robots.4]
+agent_type = "A"
+initial_infected = false
+vaccinated = false
+
+[robots.5]
+agent_type = "B"
+initial_infected = false
+vaccinated = false
+
+[robots.6]
+agent_type = "B"
+initial_infected = false
+vaccinated = false
+
+[robots.7]
+agent_type = "B"
+initial_infected = false
+vaccinated = false
+
+[robots.8]
+agent_type = "B"
+initial_infected = false
+vaccinated = false
+
+[robots.9]
+agent_type = "B"
+initial_infected = false
+vaccinated = false
+
+[robots.10]
+agent_type = "B"
+initial_infected = false
+vaccinated = false

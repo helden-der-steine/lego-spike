@@ -1,7 +1,7 @@
 """
 Diagnostic utility for inspecting live ColorSensor HSV and reflection readings over arena zones.
 
-Deploy to a hub with: .\\deploy_all.ps1 -ScriptPath color_sensor_logger.py -RobotIds 1
+Deploy to a hub with: .\\deploy_script.ps1 -ScriptPath src\\run_color_sensor_logger.py -RobotIds 1
 """
 
 from pybricks.hubs import PrimeHub
@@ -9,8 +9,9 @@ from pybricks.parameters import Button
 from pybricks.tools import StopWatch, wait
 
 from robot.hardware import find_color_sensor
+from shared.sim_config import HW_CONFIG
 
-SAMPLE_INTERVAL_MS = 500
+SAMPLE_INTERVAL_MS = HW_CONFIG.color_logger_sample_interval_ms
 TABLE_DIVIDER = "-" * 50
 
 
@@ -37,8 +38,7 @@ def main():
         reflection = sensor.reflection()
 
         print(
-            f"{elapsed_s:>5.1f}s | {str(color):<12} | "
-            f"({int(hsv.h):3d}, {int(hsv.s):3d}, {int(hsv.v):3d}) | {int(reflection):3d}%"
+            f"{elapsed_s:>5.1f}s | {str(color):<12} | ({int(hsv.h):3d}, {int(hsv.s):3d}, {int(hsv.v):3d}) | {int(reflection):3d}%"
         )
         wait(SAMPLE_INTERVAL_MS)
 

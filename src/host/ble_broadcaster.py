@@ -7,8 +7,9 @@ import sys
 
 from host.ble_codec import encode_pybricks_payload
 from shared.protocol import CONTROL_CHANNEL, LEGO_COMPANY_ID
+from shared.sim_config import HOST_CONFIG
 
-DEFAULT_BROADCAST_DURATION_S = 1.8
+DEFAULT_BROADCAST_DURATION_S = HOST_CONFIG.broadcast_duration_ms / 1000.0
 WINDOWS_PLATFORM = "win32"
 
 

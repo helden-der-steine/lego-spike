@@ -1,7 +1,8 @@
 """
 Hardware abstraction for the LEGO SPIKE Prime hub, motors, sensors, and 5x5 display.
 
-Runs on the Pybricks hub (MicroPython).
+Runs on the Pybricks hub (MicroPython). All ports, geometry, speaker tones, and HSV
+thresholds are loaded from `shared.sim_config.HW_CONFIG` (sourced from `config.toml`).
 """
 
 from pybricks.geometry import Matrix
@@ -9,49 +10,55 @@ from pybricks.parameters import Color, Direction, Port
 from pybricks.pupdevices import ColorSensor, Motor, UltrasonicSensor
 from pybricks.robotics import DriveBase
 
-from shared.sim_config import (
-    STATE_INFECTED,
-    STATE_RECOVERED,
-    STATE_SUSCEPTIBLE,
-    STATE_VACCINATED,
-    ZONE_NAMES,
-)
+from shared.enums import PortLetter, SIRState, Zone
+from shared.sim_config import HW_CONFIG
 
-# Default hardware port assignments
-LEFT_MOTOR_PORT = Port.C
-RIGHT_MOTOR_PORT = Port.D
-COLOR_SENSOR_PORT = Port.B
-DISTANCE_SENSOR_PORT = Port.A
+PORT_MAP = {
+    PortLetter.A: Port.A,
+    PortLetter.B: Port.B,
+    PortLetter.C: Port.C,
+    PortLetter.D: Port.D,
+    PortLetter.E: Port.E,
+    PortLetter.F: Port.F,
+}
+
+# Hardware port assignments
+LEFT_MOTOR_PORT = PORT_MAP[HW_CONFIG.left_motor_port]
+RIGHT_MOTOR_PORT = PORT_MAP[HW_CONFIG.right_motor_port]
+COLOR_SENSOR_PORT = PORT_MAP[HW_CONFIG.color_sensor_port]
+DISTANCE_SENSOR_PORT = PORT_MAP[HW_CONFIG.distance_sensor_port]
 SCAN_PORTS = (Port.A, Port.B, Port.E, Port.F, Port.C, Port.D)
 
 # Standard SPIKE Prime wheel geometry (mm)
-WHEEL_DIAMETER_MM = 56
-AXLE_TRACK_MM = 112
+WHEEL_DIAMETER_MM = HW_CONFIG.wheel_diameter_mm
+AXLE_TRACK_MM = HW_CONFIG.axle_track_mm
 
 # Speaker feedback tones
-BEEP_START_FREQ_HZ = 1000
-BEEP_START_DURATION_MS = 200
-BEEP_INFECTION_FREQ_HZ = 600
-BEEP_RECOVERY_FREQ_HZ = 800
-BEEP_EVENT_DURATION_MS = 150
-BEEP_STOP_FREQ_HZ = 400
-BEEP_STOP_DURATION_MS = 300
+_SPEAKER = HW_CONFIG.speaker
+BEEP_START_FREQ_HZ = _SPEAKER.start_freq_hz
+BEEP_START_DURATION_MS = _SPEAKER.start_duration_ms
+BEEP_INFECTION_FREQ_HZ = _SPEAKER.infection_freq_hz
+BEEP_RECOVERY_FREQ_HZ = _SPEAKER.recovery_freq_hz
+BEEP_EVENT_DURATION_MS = _SPEAKER.event_duration_ms
+BEEP_STOP_FREQ_HZ = _SPEAKER.stop_freq_hz
+BEEP_STOP_DURATION_MS = _SPEAKER.stop_duration_ms
 
-# Calibrated HSV thresholds for zone classification (observed on printed arena mats)
-MIN_ZONE_VALUE = 22  # Ignore dark borders, black lines, and lift/transition artifacts
-RED_HUE_LOW_MAX = 15
-RED_HUE_HIGH_MIN = 330
-RED_MIN_SATURATION = 65
-YELLOW_HUE_MIN = 20
-YELLOW_HUE_MAX = 55
-YELLOW_MIN_SATURATION = 55
-YELLOW_MIN_VALUE = 35
-GREEN_HUE_MIN = 95
-GREEN_HUE_MAX = 165
-GREEN_MIN_SATURATION = 35
-BLUE_HUE_MIN = 175
-BLUE_HUE_MAX = 235
-BLUE_MIN_SATURATION = 60
+# Calibrated HSV thresholds for zone classification
+_HSV = HW_CONFIG.color_hsv
+MIN_ZONE_VALUE = _HSV.min_zone_value
+RED_HUE_LOW_MAX = _HSV.red.hue_low_max
+RED_HUE_HIGH_MIN = _HSV.red.hue_high_min
+RED_MIN_SATURATION = _HSV.red.min_saturation
+YELLOW_HUE_MIN = _HSV.yellow.hue_min
+YELLOW_HUE_MAX = _HSV.yellow.hue_max
+YELLOW_MIN_SATURATION = _HSV.yellow.min_saturation
+YELLOW_MIN_VALUE = _HSV.yellow.min_value
+GREEN_HUE_MIN = _HSV.green.hue_min
+GREEN_HUE_MAX = _HSV.green.hue_max
+GREEN_MIN_SATURATION = _HSV.green.min_saturation
+BLUE_HUE_MIN = _HSV.blue.hue_min
+BLUE_HUE_MAX = _HSV.blue.hue_max
+BLUE_MIN_SATURATION = _HSV.blue.min_saturation
 
 # 5x5 LED matrix icons (pixel brightness 0..100)
 ICON_I = Matrix([
@@ -87,10 +94,10 @@ ICON_V = Matrix([
 ])
 
 STATE_DISPLAY_MAP = {
-    STATE_INFECTED: (Color.RED, ICON_I),
-    STATE_RECOVERED: (Color.GREEN, ICON_R),
-    STATE_VACCINATED: (Color.CYAN, ICON_V),
-    STATE_SUSCEPTIBLE: (Color.BLUE, ICON_S),
+    SIRState.INFECTED: (Color.RED, ICON_I),
+    SIRState.RECOVERED: (Color.GREEN, ICON_R),
+    SIRState.VACCINATED: (Color.CYAN, ICON_V),
+    SIRState.SUSCEPTIBLE: (Color.BLUE, ICON_S),
 }
 
 
@@ -200,12 +207,12 @@ def detect_zone(sensor):
 
     # Red wraps around 0/360 degrees on the hue wheel
     if (h <= RED_HUE_LOW_MAX or h >= RED_HUE_HIGH_MIN) and s >= RED_MIN_SATURATION:
-        return ZONE_NAMES["Red"]
+        return Zone.RED
     if YELLOW_HUE_MIN <= h <= YELLOW_HUE_MAX and s >= YELLOW_MIN_SATURATION and v >= YELLOW_MIN_VALUE:
-        return ZONE_NAMES["Yellow"]
+        return Zone.YELLOW
     if GREEN_HUE_MIN <= h <= GREEN_HUE_MAX and s >= GREEN_MIN_SATURATION:
-        return ZONE_NAMES["Green"]
+        return Zone.GREEN
     if BLUE_HUE_MIN <= h <= BLUE_HUE_MAX and s >= BLUE_MIN_SATURATION:
-        return ZONE_NAMES["Blue"]
+        return Zone.BLUE
 
     return None

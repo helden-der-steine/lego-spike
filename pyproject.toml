@@ -16,3 +16,7 @@ build-backend = "uv_build"
 [tool.uv.build-backend]
 module-root = "src"
 module-name = ["host", "robot", "shared"]
+
+[tool.pyright]
+extraPaths = ["src"]
+typeCheckingMode = "standard"

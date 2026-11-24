@@ -6,33 +6,28 @@ Pure Python so it can run on both the Pybricks hub (MicroPython) and host unit t
 
 import random
 
-from shared.sim_config import AGENT_TYPE_CW, ZONE_ORDER_CW, ZONE_UNKNOWN
+from shared.enums import AgentType, NavState, Zone
+from shared.sim_config import NAV_CONFIG, ZONE_ORDER_CW
 
-# Driving & avoidance tuning parameters
-DRIVE_SPEED_MM_S = 35       # Slow forward/reverse speed (mm/s)
-DRIVE_ACCEL_MM_S2 = 100     # Straight-line acceleration (mm/s^2)
-TURN_SPEED_DEG_S = 45       # In-place turn speed (deg/s)
-TURN_ACCEL_DEG_S2 = 120     # Angular acceleration (deg/s^2)
+# Driving & avoidance tuning parameters (loaded from config.toml)
+DRIVE_SPEED_MM_S = NAV_CONFIG.drive_speed_mm_s
+DRIVE_ACCEL_MM_S2 = NAV_CONFIG.drive_accel_mm_s2
+TURN_SPEED_DEG_S = NAV_CONFIG.turn_speed_deg_s
+TURN_ACCEL_DEG_S2 = NAV_CONFIG.turn_accel_deg_s2
 
-EDGE_CONFIRM_MS = 400       # Cross touching zone seams (~14 mm) before treating None as table edge
-BACKUP_DURATION_MS = 1000   # Max reverse time (~35 mm) when backing away from an edge/disallowed zone
-EDGE_TURN_MIN_DEG = 45
-EDGE_TURN_MAX_DEG = 110
-ZONE_DEBOUNCE_SAMPLES = 3
-DISALLOWED_CONFIRM_MS = 350
+EDGE_CONFIRM_MS = NAV_CONFIG.edge_confirm_ms
+BACKUP_DURATION_MS = NAV_CONFIG.backup_duration_ms
+EDGE_TURN_MIN_DEG = NAV_CONFIG.edge_turn_min_deg
+EDGE_TURN_MAX_DEG = NAV_CONFIG.edge_turn_max_deg
+ZONE_DEBOUNCE_SAMPLES = NAV_CONFIG.zone_debounce_samples
+DISALLOWED_CONFIRM_MS = NAV_CONFIG.disallowed_confirm_ms
 
-OBSTACLE_STOP_MM = 80       # Trigger backup when obstacle is closer than 80 mm
-OBSTACLE_RESUME_MM = 100    # Hysteresis clear distance (100 mm) before turning away
-OBSTACLE_CLEAR_SAMPLES = 3
+OBSTACLE_STOP_MM = NAV_CONFIG.obstacle_stop_mm
+OBSTACLE_RESUME_MM = NAV_CONFIG.obstacle_resume_mm
+OBSTACLE_CLEAR_SAMPLES = NAV_CONFIG.obstacle_clear_samples
 
 MIN_TURN_CHECK_MS = 100
 TURN_TIMEOUT_BUFFER_MS = 2000
-
-# Navigator state machine states
-NAV_DRIVE = "DRIVE"
-NAV_BACKUP = "BACKUP"
-NAV_TURN = "TURN"
-NAV_OBSTACLE_BACKUP = "OBSTACLE_BACKUP"
 
 
 def get_allowed_next_zone(current, agent_type):
@@ -45,7 +40,7 @@ def get_allowed_next_zone(current, agent_type):
     if current not in ZONE_ORDER_CW:
         return None
     idx = ZONE_ORDER_CW.index(current)
-    step = 1 if agent_type == AGENT_TYPE_CW else -1
+    step = 1 if agent_type == AgentType.CLOCKWISE else -1
     return ZONE_ORDER_CW[(idx + step) % len(ZONE_ORDER_CW)]
 
 
@@ -66,7 +61,7 @@ def pick_edge_turn_angle(agent_type):
     - Type B turns counter-clockwise (-45..-110)
     """
     angle = random.randint(EDGE_TURN_MIN_DEG, EDGE_TURN_MAX_DEG)
-    return angle if agent_type == AGENT_TYPE_CW else -angle
+    return angle if agent_type == AgentType.CLOCKWISE else -angle
 
 
 class ZoneNavigator:
@@ -80,7 +75,7 @@ class ZoneNavigator:
         self.agent_type = agent_type
         self.drive_base = drive_base_obj
         self.has_color_sensor = has_color_sensor
-        self.state = NAV_DRIVE
+        self.state = NavState.DRIVE
         self.state_start_ms = 0
         self.turn_timeout_ms = 0
         self.seen_cur_backup = False
@@ -101,7 +96,7 @@ class ZoneNavigator:
             except Exception:
                 pass
             self.drive_base.drive(speed=DRIVE_SPEED_MM_S, turn_rate=0)
-        self.state = NAV_DRIVE
+        self.state = NavState.DRIVE
         self.state_start_ms = now_ms
 
     def _reset_debounces(self):
@@ -117,14 +112,14 @@ class ZoneNavigator:
 
     def _start_backup(self, now_ms):
         self._reset_debounces()
-        self.state = NAV_BACKUP
+        self.state = NavState.BACKUP
         self.state_start_ms = now_ms
         self.seen_cur_backup = False
         self._drive_reverse()
 
     def _start_obstacle_backup(self, now_ms, in_current_zone):
         self._reset_debounces()
-        self.state = NAV_OBSTACLE_BACKUP
+        self.state = NavState.OBSTACLE_BACKUP
         self.state_start_ms = now_ms
         self.seen_cur_obstacle_backup = in_current_zone
         self.obstacle_clear_count = 0
@@ -133,7 +128,7 @@ class ZoneNavigator:
     def _start_turn(self, now_ms):
         self._reset_debounces()
         angle = pick_edge_turn_angle(self.agent_type)
-        self.state = NAV_TURN
+        self.state = NavState.TURN
         self.state_start_ms = now_ms
         self.turn_timeout_ms = int(abs(angle) * 1000 / TURN_SPEED_DEG_S) + TURN_TIMEOUT_BUFFER_MS
         if self.drive_base:
@@ -142,7 +137,7 @@ class ZoneNavigator:
 
     def _resume_drive(self, now_ms):
         self._reset_debounces()
-        self.state = NAV_DRIVE
+        self.state = NavState.DRIVE
         self.state_start_ms = now_ms
         if self.drive_base:
             self.drive_base.drive(speed=DRIVE_SPEED_MM_S, turn_rate=0)
@@ -185,7 +180,7 @@ class ZoneNavigator:
             self.pending_zone = None
             self.pending_count = 0
             self.disallowed_start_ms = None
-            if movement_enabled and self.has_color_sensor and current_zone_val != ZONE_UNKNOWN:
+            if movement_enabled and self.has_color_sensor and current_zone_val != Zone.UNKNOWN:
                 if self.edge_start_ms is None:
                     self.edge_start_ms = now_ms
                 elif now_ms - self.edge_start_ms >= EDGE_CONFIRM_MS:
@@ -228,19 +223,19 @@ class ZoneNavigator:
         Returns the new zone name if an allowed zone transition occurred, else None.
         """
         if movement_enabled:
-            if self.state == NAV_OBSTACLE_BACKUP:
+            if self.state == NavState.OBSTACLE_BACKUP:
                 self._step_obstacle_backup(now_ms, current_zone_val, detected, distance_mm)
                 return None
 
-            if self.state == NAV_DRIVE and distance_mm is not None and distance_mm < OBSTACLE_STOP_MM:
+            if self.state == NavState.DRIVE and distance_mm is not None and distance_mm < OBSTACLE_STOP_MM:
                 self._start_obstacle_backup(now_ms, detected == current_zone_val)
                 return None
 
-            if self.state == NAV_BACKUP:
+            if self.state == NavState.BACKUP:
                 self._step_backup(now_ms, current_zone_val, detected)
                 return None
 
-            if self.state == NAV_TURN:
+            if self.state == NavState.TURN:
                 self._step_turn(now_ms)
                 return None
 
