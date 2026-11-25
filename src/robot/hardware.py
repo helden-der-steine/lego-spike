@@ -5,10 +5,15 @@ Runs on the Pybricks hub (MicroPython). All ports, geometry, speaker tones, and 
 thresholds are loaded from `shared.sim_config.HW_CONFIG` (sourced from `config.toml`).
 """
 
-from pybricks.geometry import Matrix
 from pybricks.parameters import Color, Direction, Port
 from pybricks.pupdevices import ColorSensor, Motor, UltrasonicSensor
 from pybricks.robotics import DriveBase
+# Matrix moved from pybricks.geometry to pybricks.tools in Pybricks v3.3;
+# pybricks.geometry was removed in v4.0+ (keep fallback for older hub firmware)
+try:
+    from pybricks.tools import Matrix
+except ImportError:
+    from pybricks.geometry import Matrix  # type: ignore[import-not-found]
 
 from shared.enums import PortLetter, SIRState, Zone
 from shared.sim_config import HW_CONFIG
@@ -35,13 +40,13 @@ AXLE_TRACK_MM = HW_CONFIG.axle_track_mm
 
 # Speaker feedback tones
 _SPEAKER = HW_CONFIG.speaker
-BEEP_START_FREQ_HZ = _SPEAKER.start_freq_hz
-BEEP_START_DURATION_MS = _SPEAKER.start_duration_ms
-BEEP_INFECTION_FREQ_HZ = _SPEAKER.infection_freq_hz
-BEEP_RECOVERY_FREQ_HZ = _SPEAKER.recovery_freq_hz
-BEEP_EVENT_DURATION_MS = _SPEAKER.event_duration_ms
-BEEP_STOP_FREQ_HZ = _SPEAKER.stop_freq_hz
-BEEP_STOP_DURATION_MS = _SPEAKER.stop_duration_ms
+BEEP_START_FREQ_HZ: int = _SPEAKER.start_freq_hz
+BEEP_START_DURATION_MS: int = _SPEAKER.start_duration_ms
+BEEP_INFECTION_FREQ_HZ: int = _SPEAKER.infection_freq_hz
+BEEP_RECOVERY_FREQ_HZ: int = _SPEAKER.recovery_freq_hz
+BEEP_EVENT_DURATION_MS: int = _SPEAKER.event_duration_ms
+BEEP_STOP_FREQ_HZ: int = _SPEAKER.stop_freq_hz
+BEEP_STOP_DURATION_MS: int = _SPEAKER.stop_duration_ms
 
 # Calibrated HSV thresholds for zone classification
 _HSV = HW_CONFIG.color_hsv

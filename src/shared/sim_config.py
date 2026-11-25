@@ -40,7 +40,6 @@ RECOVERY_DURATION_MS = SIM_CONFIG.recovery_duration_ms
 LOG_INTERVAL_MS = SIM_CONFIG.log_interval_ms
 PEER_CONTACT_TIMEOUT_MS = SIM_CONFIG.peer_contact_timeout_ms
 PEER_STATE_TIMEOUT_MS = SIM_CONFIG.peer_state_timeout_ms
-NO_INFECTED_END_MS = SIM_CONFIG.no_infected_end_ms
 
 # Console log dump delimiters (used by robot/controller.py and host/log_saver.py)
 LOG_DUMP_START_MARKER = "=== JSON LOG DUMP START ==="

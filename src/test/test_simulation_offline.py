@@ -29,6 +29,7 @@ class MockMatrix:
         self.grid = grid
 
 
+sys.modules["pybricks.tools"].Matrix = MockMatrix
 sys.modules["pybricks.geometry"].Matrix = MockMatrix
 
 from enum import Enum
@@ -65,7 +66,6 @@ from shared.sim_config import (
     INFECTION_CONTACT_MS,
     INFECTION_PROB_PER_SEC,
     LOG_INTERVAL_MS,
-    NO_INFECTED_END_MS,
     RECOVERY_DURATION_MS,
     ROBOT_STATS,
     ZONE_ORDER_CW,
@@ -443,26 +443,12 @@ class TestPybricksAgent(unittest.TestCase):
             sir_simulation.random.random = orig_random
 
     def test_simulation_ends_when_no_infected_remain(self):
-        sim = SIRSimulation(initial_infected=False)
-
-        # Never saw an infected robot -> must NOT end
-        self.assertFalse(sim.is_finished(60000))
-
-        # Peer 2 is infected -> simulation stays active
-        sim.observe_peer_packet(2, SIRState.INFECTED, Zone.RED, 1000)
-        self.assertTrue(sim.ever_saw_infected)
-        self.assertFalse(sim.is_finished(1000))
-
-        # Peer 2 recovers -> finishes after NO_INFECTED_END_MS confirmation
-        sim.observe_peer_packet(2, SIRState.RECOVERED, Zone.RED, 2000)
-        self.assertFalse(sim.is_finished(2000))
-        self.assertFalse(sim.is_finished(2000 + NO_INFECTED_END_MS - 1))
-        self.assertTrue(sim.is_finished(2000 + NO_INFECTED_END_MS))
-
-        # CentralHub also detects end of simulation when all robots are non-infected
+        # Host CentralHub detects end of simulation when all robots are non-infected
         with tempfile.TemporaryDirectory() as tmpdir:
             chub = CentralHub(output_dir=tmpdir)
             chub.handle_broadcast_packet(1, [1, 0.0, "S", "White", 1])
+            self.assertFalse(chub.is_simulation_finished(now=60.0, confirm_s=5.0))
+
             chub.handle_broadcast_packet(2, [2, 0.0, "I", "Red", 1])
             self.assertFalse(chub.is_simulation_finished(now=100.0, confirm_s=5.0))
             chub.handle_broadcast_packet(2, [2, 5.0, "R", "Red", 2, "R"])

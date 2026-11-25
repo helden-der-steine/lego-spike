@@ -3,7 +3,7 @@ Shared dataclass models for configuration, telemetry, and peer state.
 """
 
 from shared._compat import dataclass
-from shared.enums import AgentType, EventName, SIRState, VaccinatedStatus, Zone
+from shared.enums import AgentType, EventName, PortLetter, SIRState, VaccinatedStatus, Zone
 
 NO_CONTACT_ID = "—"
 
@@ -12,7 +12,7 @@ NO_CONTACT_ID = "—"
 class SimulationConfig:
     enable_movement: bool = True
     max_robots: int = 10
-    zone_order_cw: tuple[str, ...] = (Zone.YELLOW, Zone.BLUE, Zone.GREEN, Zone.RED)
+    zone_order_cw: tuple[Zone, ...] = (Zone.YELLOW, Zone.BLUE, Zone.GREEN, Zone.RED)
     infection_contact_ms: int = 30000
     infection_check_interval_ms: int = 1000
     infection_prob_per_sec: float = 0.05
@@ -20,7 +20,6 @@ class SimulationConfig:
     log_interval_ms: int = 5000
     peer_contact_timeout_ms: int = 2500
     peer_state_timeout_ms: int = 15000
-    no_infected_end_ms: int = 3000
 
 
 @dataclass(frozen=True)
@@ -92,10 +91,10 @@ class ColorHSVConfig:
 
 @dataclass(frozen=True)
 class HardwareConfig:
-    left_motor_port: str = "C"
-    right_motor_port: str = "D"
-    color_sensor_port: str = "B"
-    distance_sensor_port: str = "A"
+    left_motor_port: PortLetter = PortLetter.C
+    right_motor_port: PortLetter = PortLetter.D
+    color_sensor_port: PortLetter = PortLetter.B
+    distance_sensor_port: PortLetter = PortLetter.A
     wheel_diameter_mm: int = 56
     axle_track_mm: int = 112
     color_logger_sample_interval_ms: int = 500
@@ -115,12 +114,12 @@ class HostConfig:
 
 @dataclass(frozen=True)
 class RobotConfig:
-    agent_type: str = AgentType.CLOCKWISE
+    agent_type: AgentType = AgentType.CLOCKWISE
     initial_infected: bool = False
     vaccinated: bool = False
 
     @property
-    def vaccinated_label(self) -> str:
+    def vaccinated_label(self) -> VaccinatedStatus:
         """Human-readable vaccination label emitted in telemetry logs."""
         return VaccinatedStatus.YES if self.vaccinated else VaccinatedStatus.NO
 

@@ -107,7 +107,6 @@ def _validate_simulation(raw_sim):
         log_interval_ms=_require_int(raw_sim, "log_interval_ms", "simulation", min_val=1),
         peer_contact_timeout_ms=_require_int(raw_sim, "peer_contact_timeout_ms", "simulation", min_val=1),
         peer_state_timeout_ms=_require_int(raw_sim, "peer_state_timeout_ms", "simulation", min_val=1),
-        no_infected_end_ms=_require_int(raw_sim, "no_infected_end_ms", "simulation", min_val=0),
     )
 
 
@@ -223,7 +222,7 @@ def _validate_robots(raw_robots, max_robots):
     return default_entry, robots
 
 
-def validate_and_normalize(raw):
+def validate_and_normalize(raw) -> AppConfig:
     """Validates raw parsed TOML config and returns an `AppConfig` dataclass."""
     if not isinstance(raw, dict):
         raise ValueError("Top-level config must be a TOML table")

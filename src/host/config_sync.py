@@ -33,12 +33,15 @@ MODEL_IMPORTS = (
 )
 
 
+ENUM_IMPORTS = ("AgentType", "PortLetter", "Zone")
+
+
 def _format_value(val: object, indent: int = 0) -> str:
     pad = " " * indent
     inner_pad = " " * (indent + 4)
 
     if isinstance(val, StrEnum):
-        return repr(str(val))
+        return f"{type(val).__name__}.{val.name}"
     if is_dataclass(val):
         lines = [f"{type(val).__name__}("]
         for f in fields(val):
@@ -73,9 +76,11 @@ def sync_hub_config(
 ) -> str:
     """Generates `src/shared/generated_config.py` from `config.toml` for Pybricks hubs."""
     config = load_toml_config(config_path)
+    enum_imports = ", ".join(ENUM_IMPORTS)
     imports = ",\n    ".join(MODEL_IMPORTS)
     source = (
         '"""AUTO-GENERATED from config.toml by `python -m host.config_sync`. Do not edit."""\n\n'
+        f"from shared.enums import {enum_imports}\n"
         f"from shared.models import (\n    {imports},\n)\n\n"
         f"CONFIG = {_format_value(config)}\n"
     )

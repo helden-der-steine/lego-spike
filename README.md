@@ -97,8 +97,6 @@ uv run python -m host
 | `help` | Show command menu |
 | `exit` | Quit Central Hub |
 
-*(You can also start/stop an individual hub manually using its `RIGHT` / `LEFT` button.)*
-
 Runs are automatically saved to `logs/run_XX_YYYYMMDD_HHMMSS.json` on `STOP`, when all infected robots have recovered (`5.0 s` confirmation), or after `15.0 s` of telemetry inactivity.
 
 ## 6. Simulation Rules, Tests & Repository Files
@@ -106,7 +104,7 @@ Runs are automatically saved to `logs/run_XX_YYYYMMDD_HHMMSS.json` on `STOP`, wh
 - **SIR Parameters** ([config.toml](config.toml)):
   - **Infection**: `30 s` (`30000 ms`) co-location in the same valid color zone with an `"I"` robot, then `5%` probability per second.
   - **Recovery**: `"I"` $\to$ `"R"` after `120 s` (`120000 ms`).
-  - **Auto-End**: Stops automatically after `3 s` (`3000 ms`) with zero infected robots remaining.
+  - **Auto-End**: Host stops the simulation automatically after `5 s` (`5000 ms`) with zero infected robots remaining.
 - **Offline Tests**:
   ```powershell
   uv run python -m unittest discover -s src/test -p "test_*.py"

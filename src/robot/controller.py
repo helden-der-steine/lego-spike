@@ -9,7 +9,7 @@ import gc
 import json
 
 from pybricks.hubs import PrimeHub
-from pybricks.parameters import Button, Color
+from pybricks.parameters import Color
 from pybricks.tools import StopWatch, wait
 
 from robot.hardware import (
@@ -56,7 +56,7 @@ HUB_LOG_FILENAME = "log.json"
 CSV_HEADER = "Time_Stamp,ID,Event,Zone,SIR_State,Contact_ID,Agent_Type,Vaccinated"
 
 # Probe the hub's Bluetooth name first so we can bind its dedicated BLE channel
-_probe_hub = PrimeHub(observe_channels=[CONTROL_CHANNEL] + list(ROBOT_CHANNELS))
+_probe_hub = PrimeHub(observe_channels=[CONTROL_CHANNEL] + list(ROBOT_CHANNELS))    # type: ignore[call-arg]
 HUB_NAME = get_hub_name(_probe_hub)
 ROBOT_ID, AGENT_TYPE, INITIAL_INFECTED = config_from_hub_name(HUB_NAME)
 VACCINATED = get_robot_stats(ROBOT_ID).vaccinated_label
@@ -67,7 +67,9 @@ gc.collect()
 PEER_CHANNELS = [ch for ch in ROBOT_CHANNELS if ch != BROADCAST_CHANNEL]
 OBSERVE_CHANNELS = [CONTROL_CHANNEL] + PEER_CHANNELS
 
-hub = PrimeHub(broadcast_channel=BROADCAST_CHANNEL, observe_channels=OBSERVE_CHANNELS)
+# pybricks-stubs omits BLE kwargs and `PrimeHub.ble` even though hub firmware supports them
+hub = PrimeHub(broadcast_channel=BROADCAST_CHANNEL, observe_channels=OBSERVE_CHANNELS)  # type: ignore[call-arg]
+ble = hub.ble  # type: ignore[attr-defined]
 stopwatch = StopWatch()
 sim = SIRSimulation(initial_infected=INITIAL_INFECTED)
 log_entries = []
@@ -109,7 +111,7 @@ def log_sample(event_name=EventName.SAMPLE, contact_id=NO_CONTACT_ID):
 
     event_code = event_code_from_name(event_name)
     try:
-        hub.ble.broadcast((ROBOT_ID, elapsed_s, sim.sir_state, sim.current_zone, seq_num, event_code))
+        ble.broadcast((ROBOT_ID, elapsed_s, sim.sir_state, sim.current_zone, seq_num, event_code))
     except Exception:
         pass
 
@@ -118,7 +120,7 @@ def observe_peers(now_ms):
     """Reads peer BLE channels and updates/expires peer SIR state."""
     for ch in PEER_CHANNELS:
         try:
-            obs = hub.ble.observe(ch)
+            obs = ble.observe(ch)
         except Exception:
             obs = None
 
@@ -145,7 +147,7 @@ def check_laptop_command():
     """Observes BLE Channel 0 for CMD_START or CMD_STOP from the central hub."""
     global _observe_error_logged
     try:
-        obs = hub.ble.observe(CONTROL_CHANNEL)
+        obs = ble.observe(CONTROL_CHANNEL)
     except Exception as exc:
         if not _observe_error_logged:
             print(f"[ROBOT {ROBOT_ID}] BLE observe(Ch {CONTROL_CHANNEL}) error: {exc}")
@@ -162,12 +164,12 @@ def check_laptop_command():
 
 
 def wait_for_start():
-    """Sits in Standby mode until START arrives on Channel 0 or RIGHT is pressed."""
+    """Sits in Standby mode until START arrives from the host on Channel 0."""
     show_state(hub, sim.sir_state)
     hub.light.on(Color.ORANGE)
 
     try:
-        hub.ble.broadcast((STANDBY_TAG, ROBOT_ID, sim.sir_state))
+        ble.broadcast((STANDBY_TAG, ROBOT_ID, sim.sir_state))
     except Exception:
         pass
 
@@ -176,7 +178,7 @@ def wait_for_start():
     )
 
     while True:
-        if check_laptop_command() == ControlCommand.START or Button.RIGHT in hub.buttons.pressed():
+        if check_laptop_command() == ControlCommand.START:
             print(f"[ROBOT {ROBOT_ID}] START broadcast received on Channel {CONTROL_CHANNEL}! Starting...")
             break
         wait(LOOP_TICK_MS)
@@ -192,7 +194,7 @@ def _shutdown():
     if drive_base:
         drive_base.stop()
     try:
-        hub.ble.broadcast(None)
+        ble.broadcast(None)
     except Exception:
         pass
     hub.display.off()
@@ -232,7 +234,7 @@ def main():
     last_log_ms = 0
 
     while True:
-        if check_laptop_command() == ControlCommand.STOP or Button.LEFT in hub.buttons.pressed():
+        if check_laptop_command() == ControlCommand.STOP:
             print(f"[ROBOT {ROBOT_ID}] STOP broadcast received on Channel {CONTROL_CHANNEL}! Halting...")
             break
 
@@ -267,12 +269,7 @@ def main():
             hub.speaker.beep(frequency=BEEP_RECOVERY_FREQ_HZ, duration=BEEP_EVENT_DURATION_MS)
             log_sample(EventName.RECOVERY)
 
-        # 3. End simulation once no infected robots remain
-        if sim.is_finished(now_ms):
-            print(f"[ROBOT {ROBOT_ID}] No infected robots remaining! Ending simulation...")
-            break
-
-        # 4. Periodic telemetry snapshot
+        # 3. Periodic telemetry snapshot
         if now_ms - last_log_ms >= LOG_INTERVAL_MS:
             log_sample(EventName.SAMPLE)
             last_log_ms = now_ms
