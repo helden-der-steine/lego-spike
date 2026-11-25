@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
-import unittest
-import os
-import sys
+from enum import Enum
 import json
-import struct
+from pathlib import Path
+import sys
 import tempfile
+import unittest
 from unittest.mock import MagicMock
 
+SRC_DIR = Path(__file__).resolve().parents[1]
+if str(SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(SRC_DIR))
+
 # Mock Pybricks modules for host PC testing
-pybricks_mock = MagicMock()
 for mod in [
     "pybricks",
     "pybricks.hubs",
@@ -26,25 +29,54 @@ class MockMatrix:
         self.grid = grid
 
 
+sys.modules["pybricks.tools"].Matrix = MockMatrix
 sys.modules["pybricks.geometry"].Matrix = MockMatrix
 
-from download_log import save_json_log
-import live_ble_receiver
-from live_ble_receiver import (
-    CentralHub,
-    CMD_START,
-    CMD_STOP,
-    LAPTOP_BROADCAST_CHANNEL,
-    ROBOT_OBSERVE_CHANNELS,
-    encode_pybricks_payload,
-    decode_pybricks_payload,
+from enum import Enum
+
+from host.ble_codec import PybricksValueType, decode_pybricks_payload, encode_pybricks_payload
+from host.central_hub import CentralHub
+from host.log_saver import save_json_log
+from robot.hardware import ICON_I, ICON_R, ICON_S, ICON_V, detect_zone
+from robot.navigation import (
+    BACKUP_DURATION_MS,
+    DISALLOWED_CONFIRM_MS,
+    DRIVE_SPEED_MM_S,
+    EDGE_CONFIRM_MS,
+    OBSTACLE_CLEAR_SAMPLES,
+    OBSTACLE_RESUME_MM,
+    OBSTACLE_STOP_MM,
+    ZONE_DEBOUNCE_SAMPLES,
+    ZoneNavigator,
+    get_allowed_next_zone,
+    is_zone_transition_allowed,
+    pick_edge_turn_angle,
+)
+from robot.sir_simulation import SIRSimulation
+from shared.enums import AgentType, ControlCommand, EventName, NavState, SIRState, VaccinatedStatus, Zone
+from shared.protocol import (
+    CONTROL_CHANNEL,
+    ROBOT_CHANNELS,
+    event_code_from_name,
+    event_name_from_code,
+)
+from shared.sim_config import (
+    ENABLE_MOVEMENT,
+    INFECTION_CHECK_INTERVAL_MS,
+    INFECTION_CONTACT_MS,
+    INFECTION_PROB_PER_SEC,
+    LOG_INTERVAL_MS,
+    RECOVERY_DURATION_MS,
+    ROBOT_STATS,
+    ZONE_ORDER_CW,
+    config_from_hub_name,
+    get_robot_stats,
+    parse_robot_id,
 )
 
 
 class TestPybricksAgent(unittest.TestCase):
     def test_icons_dimensions(self):
-        from agent_robot import ICON_I, ICON_S, ICON_R, ICON_V, CONTROL_CHANNEL
-
         self.assertEqual(CONTROL_CHANNEL, 0)
         for name, icon in [("ICON_I", ICON_I), ("ICON_S", ICON_S), ("ICON_R", ICON_R), ("ICON_V", ICON_V)]:
             self.assertEqual(len(icon.grid), 5, f"{name} must have 5 rows")
@@ -53,14 +85,28 @@ class TestPybricksAgent(unittest.TestCase):
                 for val in row:
                     self.assertIn(val, (0, 100), f"Pixel in {name} must be 0 or 100")
 
+    def test_enums_are_stdlib_enums_on_host(self):
+        from dataclasses import MISSING, fields, is_dataclass
+        import shared.models as models
+
+        for enum_cls in (AgentType, Zone, SIRState, VaccinatedStatus, ControlCommand, EventName, NavState, PybricksValueType):
+            self.assertTrue(issubclass(enum_cls, Enum), f"{enum_cls.__name__} must be an Enum on host")
+
+        # Every dataclass in shared.models must define defaults on all fields for MicroPython _compat
+        for attr_name in dir(models):
+            obj = getattr(models, attr_name)
+            if isinstance(obj, type) and is_dataclass(obj):
+                for f in fields(obj):
+                    self.assertIsNot(f.default, MISSING, f"{obj.__name__}.{f.name} must define a default")
+
     def test_encode_decode_roundtrip_channel_zero_and_telemetry(self):
         # Channel 0 START (1) and STOP (2)
-        p_start = encode_pybricks_payload(0, CMD_START)
+        p_start = encode_pybricks_payload(0, ControlCommand.START)
         ch, vals = decode_pybricks_payload(p_start)
         self.assertEqual(ch, 0)
         self.assertEqual(vals, [1])
 
-        p_stop = encode_pybricks_payload(0, CMD_STOP)
+        p_stop = encode_pybricks_payload(0, ControlCommand.STOP)
         ch, vals = decode_pybricks_payload(p_stop)
         self.assertEqual(ch, 0)
         self.assertEqual(vals, [2])
@@ -71,31 +117,42 @@ class TestPybricksAgent(unittest.TestCase):
         self.assertEqual(ch, 3)
         self.assertEqual(vals, [3, 4.0, "S", "0", 5])
 
+    def test_protocol_event_mapping_roundtrip(self):
+        for event_name in ("Sample", "Start", "change_zone", "Infection", "Recovery"):
+            code = event_code_from_name(event_name)
+            self.assertEqual(event_name_from_code(code), event_name)
+
     def test_save_json_log(self):
         sample_dump = """
 === JSON LOG DUMP START ===
 [{"Time_Stamp": 0.0, "ID": 1, "Event": "Start", "Zone": "0", "SIR_State": "I", "Contact_ID": "—", "Agent_Type": "A", "Vaccinated": "No"}]
 === JSON LOG DUMP END ===
 """
-        filepath = save_json_log(sample_dump)
-        self.assertIsNotNone(filepath)
-        self.assertTrue(os.path.exists(filepath))
-        with open(filepath, "r") as f:
-            data = json.load(f)
-        self.assertEqual(len(data), 1)
-        self.assertEqual(data[0]["SIR_State"], "I")
-        os.remove(filepath)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            filepath = save_json_log(sample_dump, output_dir=tmpdir)
+            self.assertIsNotNone(filepath)
+            assert filepath is not None
+            self.assertTrue(filepath.exists())
+            with filepath.open("r", encoding="utf-8") as f:
+                data = json.load(f)
+            self.assertEqual(len(data), 1)
+            self.assertEqual(data[0]["SIR_State"], "I")
+
+            # Malformed or non-array payloads must fail gracefully
+            self.assertIsNone(save_json_log("[not valid json]", output_dir=tmpdir))
+            self.assertIsNone(save_json_log("no json brackets here", output_dir=tmpdir))
 
     def test_central_hub_channels_1_to_10_and_deduplication(self):
-        self.assertEqual(LAPTOP_BROADCAST_CHANNEL, 0)
-        self.assertEqual(ROBOT_OBSERVE_CHANNELS, set(range(1, 11)))
+        self.assertEqual(CONTROL_CHANNEL, 0)
+        self.assertEqual(set(ROBOT_CHANNELS), set(range(1, 11)))
 
         with tempfile.TemporaryDirectory() as tmpdir:
             hub = CentralHub(output_dir=tmpdir)
 
-            # Channel 0 (laptop's own broadcast) and Channel 11 must be ignored
+            # Channel 0, Channel 11, and boolean-leading packets must be ignored
             hub.handle_broadcast_packet(0, [1])
             hub.handle_broadcast_packet(11, [11, 1.0, "I", "0", 1])
+            hub.handle_broadcast_packet(1, [True, 1.0, "I", "0", 1])
             self.assertEqual(len(hub.current_run_entries), 0)
 
             # Standby heartbeat on Channel 1
@@ -113,7 +170,8 @@ class TestPybricksAgent(unittest.TestCase):
             self.assertEqual(len(hub.current_run_entries), 3)
             saved_path = hub.save_run()
             self.assertIsNotNone(saved_path)
-            with open(saved_path, "r") as f:
+            assert saved_path is not None
+            with saved_path.open("r", encoding="utf-8") as f:
                 saved_data = json.load(f)
             self.assertEqual(len(saved_data), 3)
             by_id = {row["ID"]: row for row in saved_data}
@@ -122,20 +180,17 @@ class TestPybricksAgent(unittest.TestCase):
             self.assertEqual(by_id[10]["Agent_Type"], "B")
 
     def test_config_from_hub_name(self):
-        from agent_robot import (
-            ROBOT_STATS,
-            config_from_hub_name,
-            get_robot_stats,
-            parse_robot_id,
-        )
+        from dataclasses import is_dataclass
+        from shared.models import RobotConfig
 
         self.assertEqual(len(ROBOT_STATS), 11)
         self.assertIsNone(ROBOT_STATS[0])
         for rid in range(1, 11):
-            self.assertIn(ROBOT_STATS[rid]["agent_type"], ("A", "B"))
-            self.assertIsInstance(ROBOT_STATS[rid]["initial_infected"], bool)
-            self.assertIn(ROBOT_STATS[rid]["vaccinated"], ("Yes", "No"))
-            self.assertEqual(get_robot_stats(rid), live_ble_receiver.get_robot_stats(rid))
+            self.assertTrue(is_dataclass(ROBOT_STATS[rid]))
+            self.assertIsInstance(ROBOT_STATS[rid], RobotConfig)
+            self.assertIn(ROBOT_STATS[rid].agent_type, ("A", "B"))
+            self.assertIsInstance(ROBOT_STATS[rid].initial_infected, bool)
+            self.assertIn(ROBOT_STATS[rid].vaccinated_label, ("Yes", "No"))
 
         self.assertEqual(parse_robot_id("Held 1"), 1)
         self.assertEqual(parse_robot_id("Held 10"), 10)
@@ -148,15 +203,6 @@ class TestPybricksAgent(unittest.TestCase):
         self.assertEqual(config_from_hub_name("Held 10"), (10, "B", False))
 
     def test_zone_order_and_allowed_transitions(self):
-        from agent_robot import (
-            ENABLE_MOVEMENT,
-            DRIVE_SPEED_MM_S,
-            ZONE_ORDER_CW,
-            get_allowed_next_zone,
-            is_zone_transition_allowed,
-            pick_edge_turn_angle,
-        )
-
         self.assertTrue(ENABLE_MOVEMENT)
         self.assertLessEqual(DRIVE_SPEED_MM_S, 50)
         self.assertEqual(ZONE_ORDER_CW, ("Yellow", "Blue", "Green", "Red"))
@@ -194,15 +240,6 @@ class TestPybricksAgent(unittest.TestCase):
             self.assertGreaterEqual(ang_b, -110)
 
     def test_zone_navigator_transitions_and_edge_bounces(self):
-        from agent_robot import (
-            BACKUP_DURATION_MS,
-            DISALLOWED_CONFIRM_MS,
-            DRIVE_SPEED_MM_S,
-            EDGE_CONFIRM_MS,
-            ZONE_DEBOUNCE_SAMPLES,
-            ZoneNavigator,
-        )
-
         class FakeDriveBase:
             def __init__(self):
                 self.drives = []
@@ -280,8 +317,7 @@ class TestPybricksAgent(unittest.TestCase):
             res = nav_a.step(t + 140 + i * 20, "Green", "Red")
         self.assertEqual(res, "Red")
 
-        # 2. Type B hitting outer edge (None for >= EDGE_CONFIRM_MS) backs up, turns -45..-110,
-        #    and stops backup early if crossing back out
+        # 2. Type B hitting outer edge backs up, turns -45..-110, stops backup early if crossing back out
         db_b = FakeDriveBase()
         nav_b = ZoneNavigator("B", drive_base_obj=db_b, has_color_sensor=True)
         nav_b.start(now_ms=0)
@@ -308,8 +344,6 @@ class TestPybricksAgent(unittest.TestCase):
         self.assertEqual(len(db_none.turns), 0)
 
         # 4. Distance sensor obstacle stop, backup, and turn away (80 mm / 100 mm thresholds)
-        from agent_robot import OBSTACLE_CLEAR_SAMPLES, OBSTACLE_RESUME_MM, OBSTACLE_STOP_MM
-
         self.assertEqual(OBSTACLE_STOP_MM, 80)
         self.assertEqual(OBSTACLE_RESUME_MM, 100)
         db_obs = FakeDriveBase()
@@ -343,8 +377,6 @@ class TestPybricksAgent(unittest.TestCase):
         self.assertEqual(db_obs.drives[-1], (DRIVE_SPEED_MM_S, 0))
 
     def test_detect_zone_new_paper_hsv(self):
-        from agent_robot import detect_zone
-
         class FakeHSV:
             def __init__(self, h, s, v):
                 self.h, self.s, self.v = h, s, v
@@ -387,168 +419,159 @@ class TestPybricksAgent(unittest.TestCase):
             self.assertIsNone(detect_zone(FakeSensor(*hsv)))
 
     def test_logging_interval_and_infection_timing(self):
-        import agent_robot as ar
+        import robot.sir_simulation as sir_simulation
 
-        self.assertEqual(ar.LOG_INTERVAL_MS, 5000)
-        self.assertEqual(ar.INFECTION_CONTACT_MS, 30000)
-        self.assertEqual(ar.INFECTION_CHECK_INTERVAL_MS, 1000)
-        self.assertEqual(ar.INFECTION_PROB_PER_SEC, 0.05)
+        self.assertEqual(LOG_INTERVAL_MS, 5000)
+        self.assertEqual(INFECTION_CONTACT_MS, 30000)
+        self.assertEqual(INFECTION_CHECK_INTERVAL_MS, 1000)
+        self.assertEqual(INFECTION_PROB_PER_SEC, 0.05)
         self.assertEqual(
-            (ar.STATE_SUSCEPTIBLE, ar.STATE_INFECTED, ar.STATE_RECOVERED, ar.STATE_VACCINATED),
+            (SIRState.SUSCEPTIBLE, SIRState.INFECTED, SIRState.RECOVERED, SIRState.VACCINATED),
             ("S", "I", "R", "V"),
         )
 
-        orig_observe = ar.hub.ble.observe
-        orig_random = ar.random.random
-        orig_time = ar.stopwatch.time
+        sim = SIRSimulation(initial_infected=False)
+        sim.current_zone = Zone.RED
+
+        orig_random = sir_simulation.random.random
         try:
-            ar._clear_peer_contact()
-            ar.peer_last_seen.clear()
-            ar.peer_states.clear()
-            ar.peer_zones.clear()
-            ar.ever_saw_infected = False
-            ar.no_infected_since = None
-            ar.current_zone = "Red"
-            ar.sir_state = ar.STATE_SUSCEPTIBLE
-            ar.stopwatch.time = lambda: 31000
-            ar.hub.ble.observe = lambda ch: (2, 1.0, ar.STATE_INFECTED, "Red", 1) if ch == 2 else None
+            sim.observe_peer_packet(2, SIRState.INFECTED, Zone.RED, 0)
+            sir_simulation.random.random = lambda: 0.0
+            self.assertIsNone(sim.check_zone_infection(0))
 
-            ar.random.random = lambda: 0.0
-            ar.check_zone_infection(0)
-            ar.check_zone_infection(29999)
-            self.assertEqual(ar.sir_state, ar.STATE_SUSCEPTIBLE)
+            sim.observe_peer_packet(2, SIRState.INFECTED, Zone.RED, 29999)
+            self.assertIsNone(sim.check_zone_infection(29999))
+            self.assertEqual(sim.sir_state, SIRState.SUSCEPTIBLE)
 
-            ar.random.random = lambda: 0.99
-            ar.check_zone_infection(30000)
-            self.assertEqual(ar.sir_state, ar.STATE_SUSCEPTIBLE)
+            sir_simulation.random.random = lambda: 0.99
+            sim.observe_peer_packet(2, SIRState.INFECTED, Zone.RED, 30000)
+            self.assertIsNone(sim.check_zone_infection(30000))
+            self.assertEqual(sim.sir_state, SIRState.SUSCEPTIBLE)
 
-            ar.random.random = lambda: 0.0
-            ar.check_zone_infection(30500)
-            self.assertEqual(ar.sir_state, ar.STATE_SUSCEPTIBLE)
+            sir_simulation.random.random = lambda: 0.0
+            sim.observe_peer_packet(2, SIRState.INFECTED, Zone.RED, 30500)
+            self.assertIsNone(sim.check_zone_infection(30500))
+            self.assertEqual(sim.sir_state, SIRState.SUSCEPTIBLE)
 
-            ar.check_zone_infection(31000)
-            self.assertEqual(ar.sir_state, ar.STATE_INFECTED)
+            sim.observe_peer_packet(2, SIRState.INFECTED, Zone.RED, 31000)
+            self.assertEqual(sim.check_zone_infection(31000), 2)
+            self.assertEqual(sim.sir_state, SIRState.INFECTED)
         finally:
-            ar.hub.ble.observe = orig_observe
-            ar.random.random = orig_random
-            ar.stopwatch.time = orig_time
+            sir_simulation.random.random = orig_random
 
     def test_simulation_ends_when_no_infected_remain(self):
-        import agent_robot as ar
+        # Host CentralHub detects end of simulation when all robots are non-infected
+        with tempfile.TemporaryDirectory() as tmpdir:
+            chub = CentralHub(output_dir=tmpdir)
+            chub.handle_broadcast_packet(1, [1, 0.0, "S", "White", 1])
+            self.assertFalse(chub.is_simulation_finished(now=60.0, confirm_s=5.0))
 
-        orig_observe = ar.hub.ble.observe
-        try:
-            ar._clear_peer_contact()
-            ar.peer_last_seen.clear()
-            ar.peer_states.clear()
-            ar.peer_zones.clear()
-            ar.sir_state = ar.STATE_SUSCEPTIBLE
-            ar.ever_saw_infected = False
-            ar.no_infected_since = None
-
-            # Never saw an infected robot -> must NOT end
-            ar.hub.ble.observe = lambda ch: None
-            ar.observe_peers(0)
-            self.assertFalse(ar.is_simulation_finished(60000))
-
-            # Peer 2 is infected -> simulation stays active
-            ar.hub.ble.observe = lambda ch: (2, 1.0, ar.STATE_INFECTED, "Red", 1) if ch == 2 else None
-            ar.observe_peers(1000)
-            self.assertTrue(ar.ever_saw_infected)
-            self.assertFalse(ar.is_simulation_finished(1000))
-
-            # Peer 2 recovers -> finishes after NO_INFECTED_END_MS confirmation
-            ar.hub.ble.observe = lambda ch: (2, 5.0, ar.STATE_RECOVERED, "Red", 2) if ch == 2 else None
-            ar.observe_peers(2000)
-            self.assertFalse(ar.is_simulation_finished(2000))
-            self.assertFalse(ar.is_simulation_finished(2000 + ar.NO_INFECTED_END_MS - 1))
-            self.assertTrue(ar.is_simulation_finished(2000 + ar.NO_INFECTED_END_MS))
-
-            # CentralHub also detects end of simulation when all robots are non-infected
-            with tempfile.TemporaryDirectory() as tmpdir:
-                chub = CentralHub(output_dir=tmpdir)
-                chub.handle_broadcast_packet(1, [1, 0.0, "S", "White", 1])
-                chub.handle_broadcast_packet(2, [2, 0.0, "I", "Red", 1])
-                self.assertFalse(chub.is_simulation_finished(now=100.0, confirm_s=5.0))
-                chub.handle_broadcast_packet(2, [2, 5.0, "R", "Red", 2, "R"])
-                self.assertEqual(chub.current_run_entries[-1]["Event"], "Recovery")
-                self.assertFalse(chub.is_simulation_finished(now=105.0, confirm_s=5.0))
-                self.assertFalse(chub.is_simulation_finished(now=109.9, confirm_s=5.0))
-                self.assertTrue(chub.is_simulation_finished(now=110.0, confirm_s=5.0))
-        finally:
-            ar.hub.ble.observe = orig_observe
+            chub.handle_broadcast_packet(2, [2, 0.0, "I", "Red", 1])
+            self.assertFalse(chub.is_simulation_finished(now=100.0, confirm_s=5.0))
+            chub.handle_broadcast_packet(2, [2, 5.0, "R", "Red", 2, "R"])
+            self.assertEqual(chub.current_run_entries[-1].event, EventName.RECOVERY)
+            self.assertFalse(chub.is_simulation_finished(now=105.0, confirm_s=5.0))
+            self.assertFalse(chub.is_simulation_finished(now=109.9, confirm_s=5.0))
+            self.assertTrue(chub.is_simulation_finished(now=110.0, confirm_s=5.0))
 
     def test_recovery_after_120_seconds(self):
-        import agent_robot as ar
+        import robot.sir_simulation as sir_simulation
 
-        self.assertEqual(ar.RECOVERY_DURATION_MS, 120000)
+        self.assertEqual(RECOVERY_DURATION_MS, 120000)
 
-        orig_observe = ar.hub.ble.observe
-        orig_random = ar.random.random
-        orig_time = ar.stopwatch.time
-        orig_broadcast = ar.hub.ble.broadcast
-        broadcasts = []
+        sim = SIRSimulation(initial_infected=False)
+        self.assertFalse(sim.check_recovery(200000))
+        self.assertEqual(sim.sir_state, SIRState.SUSCEPTIBLE)
+
+        # Initially infected robot recovers at exactly 120000 ms
+        sim_inf = SIRSimulation(initial_infected=True)
+        self.assertFalse(sim_inf.check_recovery(119999))
+        self.assertEqual(sim_inf.sir_state, SIRState.INFECTED)
+        self.assertTrue(sim_inf.check_recovery(120000))
+        self.assertEqual(sim_inf.sir_state, SIRState.RECOVERED)
+        self.assertIsNone(sim_inf.infected_since_ms)
+        self.assertFalse(sim_inf.check_recovery(250000))
+        self.assertEqual(sim_inf.sir_state, SIRState.RECOVERED)
+
+        # Robot infected during run recovers 120s after infection time and cannot be re-infected
+        sim_dyn = SIRSimulation(initial_infected=False)
+        sim_dyn.current_zone = Zone.BLUE
+        orig_random = sir_simulation.random.random
         try:
-            ar.hub.ble.broadcast = lambda payload: broadcasts.append(payload)
-            ar.log_entries.clear()
+            sir_simulation.random.random = lambda: 0.0
+            sim_dyn.observe_peer_packet(2, SIRState.INFECTED, Zone.BLUE, 1000)
+            sim_dyn.check_zone_infection(1000)
+            sim_dyn.observe_peer_packet(2, SIRState.INFECTED, Zone.BLUE, 31000)
+            self.assertEqual(sim_dyn.check_zone_infection(31000), 2)
+            self.assertEqual(sim_dyn.sir_state, SIRState.INFECTED)
+            self.assertEqual(sim_dyn.infected_since_ms, 31000)
 
-            # 1. Susceptible robot does not recover
-            ar.sir_state = ar.STATE_SUSCEPTIBLE
-            ar.infected_since_ms = None
-            self.assertFalse(ar.check_recovery(200000))
-            self.assertEqual(ar.sir_state, ar.STATE_SUSCEPTIBLE)
+            self.assertFalse(sim_dyn.check_recovery(31000 + RECOVERY_DURATION_MS - 1))
+            self.assertEqual(sim_dyn.sir_state, SIRState.INFECTED)
+            self.assertTrue(sim_dyn.check_recovery(31000 + RECOVERY_DURATION_MS))
+            self.assertEqual(sim_dyn.sir_state, SIRState.RECOVERED)
 
-            # 2. Initially infected robot recovers at exactly 120000 ms
-            ar.sir_state = ar.STATE_INFECTED
-            ar.infected_since_ms = 0
-            ar.current_zone = "Red"
-            ar.stopwatch.time = lambda: 120000
-            self.assertFalse(ar.check_recovery(119999))
-            self.assertEqual(ar.sir_state, ar.STATE_INFECTED)
-            self.assertTrue(ar.check_recovery(120000))
-            self.assertEqual(ar.sir_state, ar.STATE_RECOVERED)
-            self.assertIsNone(ar.infected_since_ms)
-            self.assertEqual(ar.log_entries[-1]["Event"], "Recovery")
-            self.assertEqual(ar.log_entries[-1]["SIR_State"], ar.STATE_RECOVERED)
-            self.assertEqual(broadcasts[-1][2], ar.STATE_RECOVERED)
-            self.assertEqual(broadcasts[-1][5], "R")
-
-            # Subsequent calls while recovered do nothing
-            self.assertFalse(ar.check_recovery(250000))
-            self.assertEqual(ar.sir_state, ar.STATE_RECOVERED)
-
-            # 3. Robot infected during the run recovers 120s after infection time
-            ar._clear_peer_contact()
-            ar.peer_last_seen.clear()
-            ar.peer_states.clear()
-            ar.peer_zones.clear()
-            ar.sir_state = ar.STATE_SUSCEPTIBLE
-            ar.infected_since_ms = None
-            ar.current_zone = "Blue"
-            ar.hub.ble.observe = lambda ch: (2, 1.0, ar.STATE_INFECTED, "Blue", 1) if ch == 2 else None
-            ar.random.random = lambda: 0.0
-            ar.stopwatch.time = lambda: 31000
-
-            ar.check_zone_infection(1000)
-            ar.check_zone_infection(31000)
-            self.assertEqual(ar.sir_state, ar.STATE_INFECTED)
-            self.assertEqual(ar.infected_since_ms, 31000)
-
-            self.assertFalse(ar.check_recovery(31000 + ar.RECOVERY_DURATION_MS - 1))
-            self.assertEqual(ar.sir_state, ar.STATE_INFECTED)
-
-            ar.stopwatch.time = lambda: 31000 + ar.RECOVERY_DURATION_MS
-            self.assertTrue(ar.check_recovery(31000 + ar.RECOVERY_DURATION_MS))
-            self.assertEqual(ar.sir_state, ar.STATE_RECOVERED)
-
-            # 4. Recovered robot cannot be re-infected
-            ar.check_zone_infection(200000)
-            ar.check_zone_infection(240000)
-            self.assertEqual(ar.sir_state, ar.STATE_RECOVERED)
+            self.assertIsNone(sim_dyn.check_zone_infection(200000))
+            self.assertEqual(sim_dyn.sir_state, SIRState.RECOVERED)
         finally:
-            ar.hub.ble.observe = orig_observe
-            ar.random.random = orig_random
-            ar.stopwatch.time = orig_time
-            ar.hub.ble.broadcast = orig_broadcast
+            sir_simulation.random.random = orig_random
+
+    def test_config_sync_and_validation(self):
+        from copy import deepcopy
+        from dataclasses import is_dataclass
+        import tomllib
+        from host.config_sync import DEFAULT_CONFIG_PATH, load_toml_config, sync_hub_config
+        from shared.config_schema import validate_and_normalize
+
+        cfg = load_toml_config()
+        self.assertTrue(is_dataclass(cfg))
+        self.assertEqual(cfg.simulation.infection_prob_per_sec, 0.05)
+        self.assertEqual(cfg.robots[2].initial_infected, True)
+        self.assertEqual(cfg.default_robot.vaccinated, False)
+
+        with DEFAULT_CONFIG_PATH.open("rb") as f:
+            raw_toml = tomllib.load(f)
+
+        # Invalid agent_type or out-of-range probability must fail fast
+        bad_prob = deepcopy(raw_toml)
+        bad_prob["simulation"]["infection_prob_per_sec"] = 1.5
+        with self.assertRaises(ValueError):
+            validate_and_normalize(bad_prob)
+
+        bad_port = deepcopy(raw_toml)
+        bad_port["hardware"]["left_motor_port"] = "Z"
+        with self.assertRaises(ValueError):
+            validate_and_normalize(bad_port)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out_file = Path(tmpdir) / "generated_config.py"
+            sync_hub_config(output_path=out_file)
+            self.assertTrue(out_file.exists())
+            namespace = {}
+            exec(out_file.read_text(encoding="utf-8"), namespace)
+            self.assertEqual(namespace["CONFIG"], cfg)
+
+    def test_pybricks_module_discovery(self):
+        """Verifies Pybricks ModuleFinder resolves all robot/* and shared/* imports."""
+        from modulefinder import ModuleFinder
+        from host.config_sync import sync_hub_config
+
+        sync_hub_config()
+        for script_name in ("run_robot.py", "run_color_sensor_logger.py"):
+            finder = ModuleFinder([str(SRC_DIR)])
+            finder.run_script(str(SRC_DIR / script_name))
+            self.assertIn("robot.hardware", finder.modules)
+            self.assertIn("shared._compat", finder.modules)
+            self.assertIn("shared.enums", finder.modules)
+            self.assertIn("shared.models", finder.modules)
+            self.assertIn("shared.sim_config", finder.modules)
+            self.assertIn("shared.config_schema", finder.modules)
+            if script_name == "run_robot.py":
+                self.assertIn("robot.controller", finder.modules)
+                self.assertIn("robot.navigation", finder.modules)
+                self.assertIn("robot.sir_simulation", finder.modules)
+                self.assertIn("shared.protocol", finder.modules)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1,0 +1,187 @@
+# ==============================================================================
+# LEGO SPIKE Prime SIR Simulation Configuration
+# ==============================================================================
+# - The host PC reads this file live on startup (`uv run python -m host`).
+# - `deploy_script.ps1` automatically compiles it into `src/shared/generated_config.py`
+#   before uploading to the SPIKE Prime hubs.
+# - All time durations are in milliseconds (*_ms).
+# ==============================================================================
+
+[simulation]
+# Set false to run SIR/BLE logic without driving motors
+enable_movement = true
+
+# Valid range: 1..20. Controls how many BLE channels (1..max_robots) the host and
+# every robot observe. Increasing this above 10 without adding [robots.11]+ tables
+# is safe: any missing IDs automatically fall back to [robots.default], though
+# hubs will spend extra ticks scanning unused BLE channels.
+max_robots = 10
+
+# Must be a 4-element permutation of Yellow, Blue, Green, Red.
+# Type "A" robots may only advance forward (+1); Type "B" only backward (-1).
+# Any other zone border is treated as disallowed and triggers a bounce.
+zone_order_cw = ["Yellow", "Blue", "Green", "Red"]
+
+# SIR epidemiological rules:
+# Once a Susceptible ('S') robot shares the same valid zone with an Infected ('I')
+# peer for `infection_contact_ms`, it rolls `random() < infection_prob_per_sec`
+# once every `infection_check_interval_ms`. Changing zones or losing peer contact
+# resets the co-location timer.
+infection_contact_ms = 30000
+infection_check_interval_ms = 1000
+infection_prob_per_sec = 0.05       # Probability per roll (0.0 .. 1.0)
+recovery_duration_ms = 120000       # Duration in 'I' before recovering to 'R' (immune)
+
+# Telemetry & peer-tracking timeouts:
+# Periodic telemetry snapshot & BLE broadcast interval
+log_interval_ms = 5000
+# If a peer is silent longer than `peer_contact_timeout_ms`, its co-location timer resets.
+peer_contact_timeout_ms = 2500
+# If a peer is silent longer than `peer_state_timeout_ms` (typically 3x log_interval_ms),
+# it is dropped from active peer tracking and no longer blocks auto-end.
+peer_state_timeout_ms = 15000
+[navigation]
+drive_speed_mm_s = 35                # Straight driving & reversing speed (mm/s)
+drive_accel_mm_s2 = 100              # Straight-line acceleration/deceleration (mm/s^2)
+turn_speed_deg_s = 45                # In-place turn speed (deg/s)
+turn_accel_deg_s2 = 120              # Angular acceleration/deceleration (deg/s^2)
+
+# How long the ColorSensor must read None (dark surface) before treating it as a
+# table edge and backing up. Must exceed the time to cross a seam between zones
+# (at 35 mm/s, 400 ms ≈ 14 mm).
+edge_confirm_ms = 400
+# Max reverse time when backing away from an edge or disallowed zone; stops early
+# if the robot detects it is about to exit the opposite side of its current zone.
+backup_duration_ms = 1000
+# Bounce turn range (degrees): Type "A" turns CW (+), Type "B" turns CCW (-).
+edge_turn_min_deg = 45
+edge_turn_max_deg = 110
+# Consecutive ticks in the allowed next zone required to commit a `change_zone` event.
+zone_debounce_samples = 3
+# Grace window before bouncing off a disallowed zone (prevents brief seam glitches).
+disallowed_confirm_ms = 350
+
+# Ultrasonic obstacle avoidance uses a hysteresis band (`obstacle_resume_mm >= obstacle_stop_mm`):
+# triggers reverse below `obstacle_stop_mm`, then keeps backing up until `obstacle_clear_samples`
+# consecutive readings are >= `obstacle_resume_mm` (or None) before turning away.
+obstacle_stop_mm = 80
+obstacle_resume_mm = 100
+obstacle_clear_samples = 3
+loop_tick_ms = 20                    # Main hub control loop sleep interval (50 Hz at 20 ms)
+
+[hardware]
+# Preferred hub ports ("A".."F"). Motors and ColorSensor fall back to scanning all
+# ports if missing on the preferred port; UltrasonicSensor checks only `distance_sensor_port`.
+left_motor_port = "C"
+right_motor_port = "D"
+color_sensor_port = "B"
+distance_sensor_port = "A"
+wheel_diameter_mm = 56               # Drive wheel diameter in mm (standard SPIKE Prime = 56)
+axle_track_mm = 112                  # Center-to-center distance between drive wheels (mm)
+color_logger_sample_interval_ms = 500  # Polling interval for `run_color_sensor_logger.py`
+
+[hardware.speaker]
+start_freq_hz = 1000                 # Startup beep pitch (Hz)
+start_duration_ms = 200              # Startup beep duration
+infection_freq_hz = 600              # Infection event beep pitch (Hz)
+recovery_freq_hz = 800               # Recovery event beep pitch (Hz)
+event_duration_ms = 150              # Infection/recovery beep duration
+stop_freq_hz = 400                   # Shutdown beep pitch (Hz)
+stop_duration_ms = 300               # Shutdown beep duration
+
+[hardware.color_hsv]
+# Readings with HSV Value (V) below this are treated as dark borders/table edges (None).
+min_zone_value = 22
+
+[hardware.color_hsv.Red]
+# Red wraps around 0/360 deg on the hue wheel: matches (hue <= hue_low_max or hue >= hue_high_min).
+hue_low_max = 15
+hue_high_min = 330
+min_saturation = 65                  # Minimum HSV Saturation (S) for Red
+
+[hardware.color_hsv.Yellow]
+hue_min = 20                         # Minimum Hue (degrees) for Yellow
+hue_max = 55                         # Maximum Hue (degrees) for Yellow
+min_saturation = 55                  # Minimum HSV Saturation (S) for Yellow
+min_value = 35                       # Minimum HSV Value (V) for Yellow
+
+[hardware.color_hsv.Green]
+hue_min = 95                         # Minimum Hue (degrees) for Green
+hue_max = 165                        # Maximum Hue (degrees) for Green
+min_saturation = 35                  # Minimum HSV Saturation (S) for Green
+
+[hardware.color_hsv.Blue]
+hue_min = 175                        # Minimum Hue (degrees) for Blue
+hue_max = 235                        # Maximum Hue (degrees) for Blue
+min_saturation = 60                  # Minimum HSV Saturation (S) for Blue
+
+[host]
+inactivity_timeout_ms = 15000        # Auto-save run if no telemetry arrives for this long
+# Host-side confirmation window with 0 infected robots before broadcasting STOP on Ch 0
+# (only triggers after at least one 'I' robot has been seen in the current run).
+no_infected_end_ms = 5000
+# How long Windows BLE advertises START/STOP on Channel 0 (long enough for all hubs to hear it).
+broadcast_duration_ms = 1800
+poll_interval_ms = 500               # Host monitor loop interval for inactivity/end checks
+post_stop_flush_ms = 500             # Grace wait after STOP broadcast before saving JSON
+logs_dir = "logs"                    # Output directory (relative to repo root) for saved JSON runs
+
+# ==============================================================================
+# Robot Roster (IDs 1..max_robots matched from hub Bluetooth name, e.g. "Held-1")
+# ==============================================================================
+# Any robot ID without an explicit [robots.<id>] table (or an unnumbered hub name)
+# uses [robots.default].
+[robots.default]
+agent_type = "A"                     # Fallback traversal direction ("A" = CW, "B" = CCW)
+initial_infected = false             # Fallback starting state (true = 'I', false = 'S')
+vaccinated = false                   # Fallback vaccination flag (formatted as "Yes"/"No" in logs)
+
+[robots.1]
+agent_type = "A"                     # Traversal direction ("A" = clockwise, "B" = counter-clockwise)
+initial_infected = false             # Starts Susceptible ('S')
+vaccinated = false                   # Not vaccinated ("No" in logs)
+
+[robots.2]
+agent_type = "A"                     # Traversal direction ("A" = clockwise, "B" = counter-clockwise)
+initial_infected = true              # Patient zero: starts Infected ('I')
+vaccinated = false                   # Not vaccinated ("No" in logs)
+
+[robots.3]
+agent_type = "A"                     # Traversal direction ("A" = clockwise, "B" = counter-clockwise)
+initial_infected = false             # Starts Susceptible ('S')
+vaccinated = false                   # Not vaccinated ("No" in logs)
+
+[robots.4]
+agent_type = "A"                     # Traversal direction ("A" = clockwise, "B" = counter-clockwise)
+initial_infected = false             # Starts Susceptible ('S')
+vaccinated = false                   # Not vaccinated ("No" in logs)
+
+[robots.5]
+agent_type = "B"                     # Traversal direction ("A" = clockwise, "B" = counter-clockwise)
+initial_infected = false             # Starts Susceptible ('S')
+vaccinated = false                   # Not vaccinated ("No" in logs)
+
+[robots.6]
+agent_type = "B"                     # Traversal direction ("A" = clockwise, "B" = counter-clockwise)
+initial_infected = false             # Starts Susceptible ('S')
+vaccinated = false                   # Not vaccinated ("No" in logs)
+
+[robots.7]
+agent_type = "B"                     # Traversal direction ("A" = clockwise, "B" = counter-clockwise)
+initial_infected = false             # Starts Susceptible ('S')
+vaccinated = false                   # Not vaccinated ("No" in logs)
+
+[robots.8]
+agent_type = "B"                     # Traversal direction ("A" = clockwise, "B" = counter-clockwise)
+initial_infected = false             # Starts Susceptible ('S')
+vaccinated = false                   # Not vaccinated ("No" in logs)
+
+[robots.9]
+agent_type = "B"                     # Traversal direction ("A" = clockwise, "B" = counter-clockwise)
+initial_infected = false             # Starts Susceptible ('S')
+vaccinated = false                   # Not vaccinated ("No" in logs)
+
+[robots.10]
+agent_type = "B"                     # Traversal direction ("A" = clockwise, "B" = counter-clockwise)
+initial_infected = false             # Starts Susceptible ('S')
+vaccinated = false                   # Not vaccinated ("No" in logs)

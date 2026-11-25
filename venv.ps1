@@ -71,8 +71,8 @@ if (Test-Path $venvPython) {
     $pyVer = & $venvPython --version 2>&1
     Write-Host " Python : $pyVer ($venvPython)" -ForegroundColor Cyan
 }
-Write-Host " Run    : uv run python live_ble_receiver.py" -ForegroundColor Cyan
-Write-Host " Deploy : .\deploy_all.ps1" -ForegroundColor Cyan
+Write-Host " Run    : uv run python -m host" -ForegroundColor Cyan
+Write-Host " Deploy : .\deploy_script.ps1" -ForegroundColor Cyan
 Write-Host " Activate manually: .\.venv\Scripts\Activate.ps1" -ForegroundColor DarkGray
 Write-Host "=====================================================" -ForegroundColor Cyan
 
