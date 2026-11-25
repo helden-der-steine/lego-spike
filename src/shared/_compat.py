@@ -20,6 +20,8 @@ else:
     try:
         from dataclasses import dataclass
     except ImportError:
+        # Note: MicroPython strips uninitialized field annotations (`x: int`), so every
+        # field on a shared dataclass must define a default value to be captured here.
         def dataclass(cls=None, **_kwargs):
             def wrap(c):
                 defaults = {}

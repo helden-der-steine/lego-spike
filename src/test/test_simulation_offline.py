@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-import asyncio
+from enum import Enum
 import json
-import os
+from pathlib import Path
 import sys
 import tempfile
 import unittest
 from unittest.mock import MagicMock
 
-SRC_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if SRC_DIR not in sys.path:
-    sys.path.insert(0, SRC_DIR)
+SRC_DIR = Path(__file__).resolve().parents[1]
+if str(SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(SRC_DIR))
 
 # Mock Pybricks modules for host PC testing
 for mod in [
@@ -86,8 +86,18 @@ class TestPybricksAgent(unittest.TestCase):
                     self.assertIn(val, (0, 100), f"Pixel in {name} must be 0 or 100")
 
     def test_enums_are_stdlib_enums_on_host(self):
+        from dataclasses import MISSING, fields, is_dataclass
+        import shared.models as models
+
         for enum_cls in (AgentType, Zone, SIRState, VaccinatedStatus, ControlCommand, EventName, NavState, PybricksValueType):
             self.assertTrue(issubclass(enum_cls, Enum), f"{enum_cls.__name__} must be an Enum on host")
+
+        # Every dataclass in shared.models must define defaults on all fields for MicroPython _compat
+        for attr_name in dir(models):
+            obj = getattr(models, attr_name)
+            if isinstance(obj, type) and is_dataclass(obj):
+                for f in fields(obj):
+                    self.assertIsNot(f.default, MISSING, f"{obj.__name__}.{f.name} must define a default")
 
     def test_encode_decode_roundtrip_channel_zero_and_telemetry(self):
         # Channel 0 START (1) and STOP (2)
@@ -121,11 +131,16 @@ class TestPybricksAgent(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             filepath = save_json_log(sample_dump, output_dir=tmpdir)
             self.assertIsNotNone(filepath)
-            self.assertTrue(os.path.exists(filepath))
-            with open(filepath, "r", encoding="utf-8") as f:
+            assert filepath is not None
+            self.assertTrue(filepath.exists())
+            with filepath.open("r", encoding="utf-8") as f:
                 data = json.load(f)
             self.assertEqual(len(data), 1)
             self.assertEqual(data[0]["SIR_State"], "I")
+
+            # Malformed or non-array payloads must fail gracefully
+            self.assertIsNone(save_json_log("[not valid json]", output_dir=tmpdir))
+            self.assertIsNone(save_json_log("no json brackets here", output_dir=tmpdir))
 
     def test_central_hub_channels_1_to_10_and_deduplication(self):
         self.assertEqual(CONTROL_CHANNEL, 0)
@@ -134,9 +149,10 @@ class TestPybricksAgent(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             hub = CentralHub(output_dir=tmpdir)
 
-            # Channel 0 (laptop's own broadcast) and Channel 11 must be ignored
+            # Channel 0, Channel 11, and boolean-leading packets must be ignored
             hub.handle_broadcast_packet(0, [1])
             hub.handle_broadcast_packet(11, [11, 1.0, "I", "0", 1])
+            hub.handle_broadcast_packet(1, [True, 1.0, "I", "0", 1])
             self.assertEqual(len(hub.current_run_entries), 0)
 
             # Standby heartbeat on Channel 1
@@ -154,7 +170,8 @@ class TestPybricksAgent(unittest.TestCase):
             self.assertEqual(len(hub.current_run_entries), 3)
             saved_path = hub.save_run()
             self.assertIsNotNone(saved_path)
-            with open(saved_path, "r", encoding="utf-8") as f:
+            assert saved_path is not None
+            with saved_path.open("r", encoding="utf-8") as f:
                 saved_data = json.load(f)
             self.assertEqual(len(saved_data), 3)
             by_id = {row["ID"]: row for row in saved_data}
@@ -512,7 +529,7 @@ class TestPybricksAgent(unittest.TestCase):
         self.assertEqual(cfg.robots[2].initial_infected, True)
         self.assertEqual(cfg.default_robot.vaccinated, False)
 
-        with open(DEFAULT_CONFIG_PATH, "rb") as f:
+        with DEFAULT_CONFIG_PATH.open("rb") as f:
             raw_toml = tomllib.load(f)
 
         # Invalid agent_type or out-of-range probability must fail fast
@@ -527,12 +544,11 @@ class TestPybricksAgent(unittest.TestCase):
             validate_and_normalize(bad_port)
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            out_file = os.path.join(tmpdir, "generated_config.py")
+            out_file = Path(tmpdir) / "generated_config.py"
             sync_hub_config(output_path=out_file)
-            self.assertTrue(os.path.exists(out_file))
+            self.assertTrue(out_file.exists())
             namespace = {}
-            with open(out_file, "r", encoding="utf-8") as f:
-                exec(f.read(), namespace)
+            exec(out_file.read_text(encoding="utf-8"), namespace)
             self.assertEqual(namespace["CONFIG"], cfg)
 
     def test_pybricks_module_discovery(self):
@@ -542,8 +558,8 @@ class TestPybricksAgent(unittest.TestCase):
 
         sync_hub_config()
         for script_name in ("run_robot.py", "run_color_sensor_logger.py"):
-            finder = ModuleFinder([SRC_DIR])
-            finder.run_script(os.path.join(SRC_DIR, script_name))
+            finder = ModuleFinder([str(SRC_DIR)])
+            finder.run_script(str(SRC_DIR / script_name))
             self.assertIn("robot.hardware", finder.modules)
             self.assertIn("shared._compat", finder.modules)
             self.assertIn("shared.enums", finder.modules)

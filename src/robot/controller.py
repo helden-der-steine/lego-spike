@@ -56,7 +56,7 @@ HUB_LOG_FILENAME = "log.json"
 CSV_HEADER = "Time_Stamp,ID,Event,Zone,SIR_State,Contact_ID,Agent_Type,Vaccinated"
 
 # Probe the hub's Bluetooth name first so we can bind its dedicated BLE channel
-_probe_hub = PrimeHub(observe_channels=[CONTROL_CHANNEL] + list(ROBOT_CHANNELS))    # type: ignore[call-arg]
+_probe_hub = PrimeHub()
 HUB_NAME = get_hub_name(_probe_hub)
 ROBOT_ID, AGENT_TYPE, INITIAL_INFECTED = config_from_hub_name(HUB_NAME)
 VACCINATED = get_robot_stats(ROBOT_ID).vaccinated_label
@@ -124,7 +124,12 @@ def observe_peers(now_ms):
         except Exception:
             obs = None
 
-        if isinstance(obs, tuple) and len(obs) >= 4 and not isinstance(obs[0], str):
+        if (
+            isinstance(obs, tuple)
+            and len(obs) >= 4
+            and isinstance(obs[0], int)
+            and not isinstance(obs[0], bool)
+        ):
             sim.observe_peer_packet(
                 other_id=obs[0],
                 other_state=obs[2],
@@ -200,6 +205,7 @@ def _shutdown():
     hub.display.off()
     hub.speaker.beep(frequency=BEEP_STOP_FREQ_HZ, duration=BEEP_STOP_DURATION_MS)
 
+    gc.collect()
     serialized_logs = [entry.to_dict() for entry in log_entries]
     try:
         with open(HUB_LOG_FILENAME, "w") as f:

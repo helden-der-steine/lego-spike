@@ -7,13 +7,13 @@ On the LEGO SPIKE Prime hub (MicroPython, no `tomllib`), imports the pre-synced
 """
 
 try:
-    import os as _os
+    from pathlib import Path as _Path
     import tomllib as _tomllib
     from shared.config_schema import validate_and_normalize as _validate_and_normalize
 
-    _PROJECT_ROOT = _os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
-    _CONFIG_PATH = _os.path.join(_PROJECT_ROOT, "config.toml")
-    with open(_CONFIG_PATH, "rb") as _cfg_file:
+    _PROJECT_ROOT = _Path(__file__).resolve().parents[2]
+    _CONFIG_PATH = _PROJECT_ROOT / "config.toml"
+    with _CONFIG_PATH.open("rb") as _cfg_file:
         CONFIG = _validate_and_normalize(_tomllib.load(_cfg_file))
 except ImportError as exc:
     print(f"[INFO] Live config.toml import unavailable ({exc}); using pre-synced shared.generated_config.")

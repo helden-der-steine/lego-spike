@@ -7,15 +7,15 @@ Run before deploying to hubs (invoked automatically by `deploy_script.ps1`):
 
 from dataclasses import fields, is_dataclass
 from enum import StrEnum
-import os
+from pathlib import Path
 import tomllib
 
 from shared.config_schema import validate_and_normalize
 from shared.models import AppConfig
 
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-DEFAULT_CONFIG_PATH = os.path.join(PROJECT_ROOT, "config.toml")
-DEFAULT_GENERATED_PATH = os.path.join(PROJECT_ROOT, "src", "shared", "generated_config.py")
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config.toml"
+DEFAULT_GENERATED_PATH = PROJECT_ROOT / "src" / "shared" / "generated_config.py"
 
 MODEL_IMPORTS = (
     "AppConfig",
@@ -63,17 +63,17 @@ def _format_value(val: object, indent: int = 0) -> str:
     return repr(val)
 
 
-def load_toml_config(config_path: str = DEFAULT_CONFIG_PATH) -> AppConfig:
+def load_toml_config(config_path: str | Path = DEFAULT_CONFIG_PATH) -> AppConfig:
     """Reads and validates `config.toml`, returning an `AppConfig` dataclass."""
-    with open(config_path, "rb") as f:
+    with Path(config_path).open("rb") as f:
         raw = tomllib.load(f)
     return validate_and_normalize(raw)
 
 
 def sync_hub_config(
-    config_path: str = DEFAULT_CONFIG_PATH,
-    output_path: str = DEFAULT_GENERATED_PATH,
-) -> str:
+    config_path: str | Path = DEFAULT_CONFIG_PATH,
+    output_path: str | Path = DEFAULT_GENERATED_PATH,
+) -> Path:
     """Generates `src/shared/generated_config.py` from `config.toml` for Pybricks hubs."""
     config = load_toml_config(config_path)
     enum_imports = ", ".join(ENUM_IMPORTS)
@@ -84,9 +84,9 @@ def sync_hub_config(
         f"from shared.models import (\n    {imports},\n)\n\n"
         f"CONFIG = {_format_value(config)}\n"
     )
-    with open(output_path, "w", encoding="utf-8") as f:
-        f.write(source)
-    return output_path
+    out_path = Path(output_path)
+    out_path.write_text(source, encoding="utf-8")
+    return out_path
 
 
 def main() -> None:

@@ -45,8 +45,8 @@ uv sync
 Per-robot parameters (`agent_type`, `initial_infected`, `vaccinated`), SIR rules, navigation tuning, hardware ports/HSV thresholds, and host timeouts are defined centrally in [config.toml](config.toml) (used live by the host PC and synced into `src/shared/generated_config.py` for the hubs on deploy):
 
 - `agent_type`: `"A"` moves clockwise (`Yellow -> Blue -> Green -> Red`), `"B"` moves counter-clockwise (`Yellow -> Red -> Green -> Blue`).
-- `initial_infected`: `True` starts as `"I"` (Red), `False` starts as `"S"` (Blue).
-- `vaccinated`: `"No"` (or `"Yes"`).
+- `initial_infected`: `true` starts as `"I"` (Red), `false` starts as `"S"` (Blue).
+- `vaccinated`: `false` (or `true`, formatted as `"No"` / `"Yes"` in logs).
 
 ## 4. Deploy Scripts to All Robots (`deploy_script.ps1`)
 

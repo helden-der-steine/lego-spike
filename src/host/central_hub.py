@@ -18,7 +18,7 @@ import asyncio
 from dataclasses import dataclass
 from datetime import datetime
 import json
-import os
+from pathlib import Path
 import sys
 import time
 
@@ -36,14 +36,14 @@ from shared.protocol import (
     build_telemetry_entry,
     event_name_from_code,
 )
-from shared.sim_config import HOST_CONFIG, get_robot_stats
+from shared.sim_config import HOST_CONFIG, MAX_ROBOTS, get_robot_stats
 
 INACTIVITY_TIMEOUT_SECONDS = HOST_CONFIG.inactivity_timeout_ms / 1000.0
 NO_INFECTED_END_SECONDS = HOST_CONFIG.no_infected_end_ms / 1000.0
 POLL_INTERVAL_SECONDS = HOST_CONFIG.poll_interval_ms / 1000.0
 POST_STOP_FLUSH_SECONDS = HOST_CONFIG.post_stop_flush_ms / 1000.0
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-OUTPUT_DIR = os.path.join(PROJECT_ROOT, HOST_CONFIG.logs_dir)
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+OUTPUT_DIR = PROJECT_ROOT / HOST_CONFIG.logs_dir
 
 TIMESTAMP_FILE_FMT = "%Y%m%d_%H%M%S"
 TIMESTAMP_LOG_FMT = "%H:%M:%S"
@@ -73,11 +73,11 @@ class CentralHub:
     def __init__(
         self,
         timeout_s: float = INACTIVITY_TIMEOUT_SECONDS,
-        output_dir: str = OUTPUT_DIR,
+        output_dir: str | Path = OUTPUT_DIR,
         observe_channels=ROBOT_CHANNELS,
     ):
         self.timeout_s = timeout_s
-        self.output_dir = output_dir
+        self.output_dir = Path(output_dir)
         self.observe_channels = set(observe_channels)
         self.broadcaster = ChannelZeroBroadcaster(CONTROL_CHANNEL)
 
@@ -178,7 +178,11 @@ class CentralHub:
             return
 
         # Telemetry tuple: (robot_id, elapsed_s, sir_state, zone[, seq_num[, event_code]])
-        if len(values) >= 4 and not isinstance(values[0], str):
+        if (
+            len(values) >= 4
+            and isinstance(values[0], int)
+            and not isinstance(values[0], bool)
+        ):
             robot_id = int(values[0])
             elapsed_s = float(values[1])
             sir_state = str(values[2])
@@ -238,21 +242,21 @@ class CentralHub:
         else:
             self._reset_run_state()
 
-    def save_run(self) -> str | None:
+    def save_run(self) -> Path | None:
         """Saves current run entries into a timestamped JSON file."""
         if not self.current_run_entries:
             return None
 
-        os.makedirs(self.output_dir, exist_ok=True)
+        self.output_dir.mkdir(parents=True, exist_ok=True)
         timestamp_str = datetime.now().strftime(TIMESTAMP_FILE_FMT)
         filename = f"run_{self.run_number:02d}_{timestamp_str}.json"
-        filepath = os.path.join(self.output_dir, filename)
+        filepath = self.output_dir / filename
 
         sorted_entries = sorted(
             self.current_run_entries, key=lambda row: (row.time_stamp, row.robot_id)
         )
 
-        with open(filepath, "w", encoding="utf-8") as f:
+        with filepath.open("w", encoding="utf-8") as f:
             json.dump([entry.to_dict() for entry in sorted_entries], f, indent=2)
 
         robot_counts: dict[int, int] = {}
@@ -280,7 +284,7 @@ def print_help() -> None:
 ================================================================
   KIT SYDSEN - LEGO SPIKE Digital Twin Central Hub (Broadcast)
   • Outgoing Control : BLE Channel {CONTROL_CHANNEL} (All robots observe Ch {CONTROL_CHANNEL})
-  • Incoming Logs    : BLE Channels 1..10 (1 channel per robot)
+  • Incoming Logs    : BLE Channels 1..{MAX_ROBOTS} (1 channel per robot)
   • Connections      : NONE (100% Connectionless BLE Broadcast)
 ================================================================
   [s] or ENTER : Broadcast START on Channel {CONTROL_CHANNEL} (starts all robots)
@@ -299,7 +303,7 @@ def print_status(hub: CentralHub) -> None:
     """Prints detected standby robots and current run statistics."""
     print("\n--- Central Hub Broadcast Status ---")
     print(f"Outgoing Channel  : {CONTROL_CHANNEL}")
-    print("Listening Channels: 1..10")
+    print(f"Listening Channels: 1..{MAX_ROBOTS}")
     print(f"Robots Seen in Standby ({len(hub.standby_robots)}):")
     if not hub.standby_robots:
         print("  • (None detected yet - start src/run_robot.py on the hubs)")
@@ -356,7 +360,7 @@ async def run_central_hub() -> None:
 
     scanner = BleakScanner(detection_callback=ble_detection_callback)
     await scanner.start()
-    print("📡 Passive BLE Scanner active on Channels 1..10 (waiting for robots in Standby)...")
+    print(f"📡 Passive BLE Scanner active on Channels 1..{MAX_ROBOTS} (waiting for robots in Standby)...")
 
     kb_task = asyncio.create_task(keyboard_listener(hub))
 
@@ -373,7 +377,7 @@ async def run_central_hub() -> None:
                 elapsed = time.time() - hub.last_packet_time
                 if elapsed >= hub.timeout_s:
                     print(
-                        f"\n[AUTO-SAVE] No broadcasts on Channels 1..10 for {elapsed:.1f}s. Ending run..."
+                        f"\n[AUTO-SAVE] No broadcasts on Channels 1..{MAX_ROBOTS} for {elapsed:.1f}s. Ending run..."
                     )
                     hub.save_run()
 
